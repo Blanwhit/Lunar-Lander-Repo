@@ -3,6 +3,7 @@
 // tangent-space normal map (RG16F) from the 259x259 samples so the main thread only
 // uploads textures.
 import { FACES, GRID, R_MOON, TILE_N } from '../geom';
+import { decodeHeightTile } from './heightCodec';
 
 export interface HeightRequest {
   id: number;
@@ -52,40 +53,10 @@ async function decode(req: HeightRequest): Promise<HeightResult> {
   const res = await fetch(req.url);
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const compressed = await res.arrayBuffer();
-  const raw = await new Response(
-    new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate')),
-  ).arrayBuffer();
-  const dv = new DataView(raw);
-  const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
-  if (magic !== 'MLH1') throw new Error('bad magic');
-  const level = dv.getUint8(4);
-  const face = dv.getUint8(5);
-  const childMask = dv.getUint8(6);
-  const x = dv.getUint32(8, true);
-  const y = dv.getUint32(12, true);
-  const hmin = dv.getFloat32(16, true);
-  const hmax = dv.getFloat32(20, true);
-  const step = dv.getFloat32(24, true);
-  const base = dv.getFloat32(28, true);
-  const G = dv.getUint16(32, true);
-  if (G !== GRID) throw new Error('grid mismatch');
+  const t = await decodeHeightTile(compressed);
+  const { level, face, childMask, x, y, hmin, hmax, step, base, q } = t;
+  const G = GRID;
   const n = G * G;
-  const lo = new Uint8Array(raw, 36, n);
-  const hi = new Uint8Array(raw, 36 + n, n);
-  const q = new Uint16Array(n);
-  for (let j = 0; j < G; j++) {
-    const row = j * G;
-    for (let i = 0; i < G; i++) {
-      const k = row + i;
-      const z = lo[k] | (hi[k] << 8);
-      const r = (z >>> 1) ^ -(z & 1);
-      let p: number;
-      if (j === 0) p = i === 0 ? 0 : q[k - 1];
-      else if (i === 0) p = q[k - G];
-      else p = q[k - 1] + q[k - G] - q[k - G - 1];
-      q[k] = (p + r) & 0xffff;
-    }
-  }
 
   // ---- normals (body frame, then projected onto the per-vertex tangent frame)
   const F = FACES[face];

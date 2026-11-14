@@ -281,6 +281,10 @@ async function main() {
   requestAnimationFrame(render);
   // debug/measurement hook (no UI): step(dt) renders one frame even when rAF is paused
   (window as any).__moon.step = (dt = 1 / 60) => renderFrame(dt, true);
+  // site API (lazy-loaded): (await __moon.siteApi()).query({ lat, lon, time })
+  let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
+  (window as any).__moon.siteApi = () =>
+    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL })));
 
   // fps counter (only counts rendered frames; readable via window.__moon.perf)
   setInterval(() => {

@@ -25,10 +25,10 @@ export class Ephemeris {
   private years = new Map<number, Promise<YearData>>();
   index: EphemIndex = { start: 2000, end: 2050 };
 
-  constructor(private baseUrl: string) {}
+  constructor(private baseUrl: string, private fetchImpl: typeof fetch = fetch.bind(globalThis)) {}
 
   async init(): Promise<void> {
-    this.index = await fetch(this.baseUrl + 'index.json').then((r) => r.json());
+    this.index = await this.fetchImpl(this.baseUrl + 'index.json').then((r) => r.json());
   }
 
   /** inclusive UTC range covered by the data */
@@ -39,7 +39,7 @@ export class Ephemeris {
   private year(y: number): Promise<YearData> {
     let p = this.years.get(y);
     if (!p) {
-      p = fetch(`${this.baseUrl}${y}.bin`)
+      p = this.fetchImpl(`${this.baseUrl}${y}.bin`)
         .then((r) => {
           if (!r.ok) throw new Error(`ephemeris ${y}: HTTP ${r.status}`);
           return r.arrayBuffer();

@@ -18,6 +18,8 @@ bar along the bottom:
 * **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
 * **Wheel / pinch**: zoom, from the whole Moon down to just above the surface. The view tilts
   towards the horizon automatically near the ground.
+* Point analysis (Earth link, power, temperature, slope, Earthrise/-set): see the
+  [Site API](#site-api-websrcapi).
 * Optional deep link: `#lat,lon,distance_m[,heading_deg[,tilt_deg[,UTC time]]]`. For example,
   Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
   `#2,84,40000,270,82,2026-01-10T12:00Z`.
@@ -56,9 +58,77 @@ make serve         # vite preview of web/dist on :4173
   the quadtree depth. Each level beyond L6 is generated only where a source DEM is fine enough to
   justify it.
 
+## Site API (`web/src/api/`)
+
+A headless TypeScript API. Give it a point and a UTC date/time, and it reports Earth
+connectivity, power availability, temperature, elevation, slope and the time until the next
+Earthrise or Earthset. **The surrounding terrain is taken into account** for every
+line-of-sight quantity. It reads the same data as the viewer: the height-tile pyramid, the JPL
+Horizons ephemeris and the IAU orientation. It needs no WebGL and has been tested in the
+browser. It should also run in Node 18+ (it only needs `fetch` and `DecompressionStream`
+pointed at a server hosting the site), but that hasn't been tested.
+
+```ts
+import { createSiteApi } from './api/siteApi';
+const api = createSiteApi({ baseUrl: '/' }); // folder that contains tiles/ and ephem/
+const r = await api.query({ lat: -89.475, lon: 222.69, time: '2026-03-01T12:00Z' });
+// options: observerHeightM (default 2), linkMaskDeg (default 0), searchDays (default 30)
+```
+
+From the viewer's console: `const api = await __moon.siteApi()`.
+
+**How terrain is handled.** Each query first builds a 360° **terrain horizon profile**.
+For every azimuth (1° steps) it ray-marches the tile pyramid outward from the observer, using
+finer tiles nearby and coarser ones far away for about 0.15° angular resolution. A ray stops
+once even the highest lunar terrain (+10.8 km) could no longer rise above the horizon found so
+far, typically 40–280 km out. The Sun and Earth count as visible by the fraction of their
+discs above that horizon, so a crater floor whose rim hides the Sun gets no power, and a site
+behind a ridge loses its Earth link.
+
+| field | meaning |
+|---|---|
+| `elevation.heightM`, `radiusM`, `dataResolutionM` | terrain height (vs the 1737.4 km sphere), radius, and grid spacing of the data used (5 m near the south pole, 167–333 m elsewhere) |
+| `slope.slopeDeg`, `aspectDeg`, `baselineM` | local slope and downslope direction (clockwise from north), from central differences over 2 grid cells |
+| `earth.*`, `sun.*` | azimuth, elevation, terrain-horizon elevation in that azimuth, margin, angular radius, visible disc fraction, distance |
+| `earthConnectivity` | `clear` / `partial` / `blocked` (whole disc / part / none above the horizon plus `linkMaskDeg`), `lineOfSight`, margin |
+| `earthEvents` | next Earthrise / Earthset (UTC) and minutes until each, within `searchDays` (the Earth's centre crossing the terrain horizon plus mask; libration drives these); `null` if none |
+| `power` | `sunlit` / `partial` / `shadow`; solar constant at the Moon's distance; irradiance for a sun-tracking panel, a horizontal panel and the local ground slope; next sunrise / sunset; illumination statistics for the next 365 days (mean disc fraction, any part, centre) |
+| `temperature` | surface and ~0.5 m subsurface temperature, regime (`sunlit` / `shadow` / `night` / `permanent-shadow`), hours since sunlight, uncertainty, method |
+| `meta` | horizon step and reach, tiles loaded, compute time, data sources |
+
+**Temperature model.** The default ([thermal.ts](web/src/api/thermal.ts)) is a 1-D regolith
+heat-conduction model using Hayne et al. (2017) Diviner-calibrated properties: density and
+conductivity profiles, temperature-dependent heat capacity, radiative conductivity, and
+incidence-dependent albedo. It's driven by the terrain-shadowed, slope-aware absorbed sunlight
+at the point over the preceding three lunations (30-minute steps). Pass
+`temperatureModel` to `createSiteApi` to swap it, for example for LRO Diviner data.
+
+**Validation** (2026-03-01 12:00 UTC):
+
+| site | result | reference |
+|---|---|---|
+| Apollo 11 (0.67°N, 23.47°E) | Earth at 70°, never sets; sunlit; 386 K surface, 247 K at 0.5 m | Diviner equatorial noon ~390 K, ~250 K at depth |
+| far side (0°, 180°E) | Earth never visible; 104 K five days after sunset | Diviner ~100 K |
+| east limb (0°, 90°E) | Earth sets 8 Mar, rises 25 Mar (libration) | expected monthly cycle |
+| Shackleton floor (89.67°S, 129.8°E) | rim horizon 21°; never sunlit in the next year; Earth blocked | permanently shadowed region |
+| Shackleton connecting ridge (89.475°S, 222.69°E) | 83% of the year with some Sun; points 1 km away 14–56% | published ~80–90% for the ridge |
+| 33°N, 16°W (Mare Imbrium) | inside a ~9 km fresh crater: 21° rim horizon, 1.3 km below the mare | crater confirmed in the independent LROC colour map |
+
+**Limitations.**
+- **Terrain resolution:** follows the tile pyramid. Away from the poles the data is 167–333 m
+  (SLDEM2015 128 ppd), so small rocks and boulders aren't resolved.
+- **Lighting:** temperatures leave out light scattered by, and infrared emitted from,
+  surrounding terrain. Values in permanently shadowed regions (19 K on Shackleton's floor) are
+  therefore lower bounds; measured values are ~25–70 K.
+- **Earth link:** this is line-of-sight geometry only. There is no RF link budget and no
+  diffraction model.
+- **Range and speed:** times are limited to the ephemeris range (2000–2050). A query takes
+  ~0.2–1.5 s once tiles are cached; the first query in a new area also loads tiles (~40 KB
+  each).
+
 ## Repository layout and size
 
-The git repository is **4.5 MB** (91 tracked files). The full working folder is **8.9 GB**
+The git repository is **4.5 MB** (95 tracked files). The full working folder is **8.9 GB**
 after lossless compaction:
 
 | path | size | in git | what it is / how to get it back |

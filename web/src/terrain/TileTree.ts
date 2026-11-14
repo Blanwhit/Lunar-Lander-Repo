@@ -307,6 +307,12 @@ export class TileTree {
         r.priority = 1e9;
         this.wantHeights.push(r);
       }
+      // the base level is always loaded in full (all 6 faces), even faces that are not
+      // visible -- refinement waits for it (see baseReady)
+      if (r.colourState === EMPTY) {
+        r.priority = 1e9;
+        this.wantColour.push(r);
+      }
     }
     if (this.roots.some((r) => r.state !== READY)) {
       this.pump();
