@@ -74,19 +74,24 @@ const TIER_LABEL: Record<Tier, string> = { good: 'Good', fair: 'Fair', poor: 'Po
 
 const fmtDeg = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)}°`;
 
-/** "Right click a spot to get more info  Got it" banner at the top of the screen */
-export function createHint(parent: HTMLElement) {
+/** "Right click a spot to get more info  Got it" banner at the top of the screen.
+ *  Returns a function that dismisses it (also called by "Got it"); safe to call repeatedly. */
+export function createHint(parent: HTMLElement): () => void {
   const el = document.createElement('div');
   el.className = 'moon-hint';
   el.setAttribute('role', 'status');
   el.innerHTML = '<span>Right click a spot to get more info</span><button type="button">Got it</button>';
-  (el.querySelector('button') as HTMLButtonElement).addEventListener('click', () => {
+  let gone = false;
+  const dismiss = () => {
+    if (gone) return;
+    gone = true;
     el.classList.add('hidden');
     setTimeout(() => el.remove(), 250);
-  });
+  };
+  (el.querySelector('button') as HTMLButtonElement).addEventListener('click', dismiss);
   for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const) el.addEventListener(ev, (e) => e.stopPropagation());
   parent.appendChild(el);
-  return el;
+  return dismiss;
 }
 
 export class SitePopup {

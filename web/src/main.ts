@@ -113,7 +113,7 @@ async function main() {
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
 
   // ---- right-click site inspector: pan the spot to the centre, popup with its score
-  createHint(document.body);
+  const dismissHint = createHint(document.body);
   const popup = new SitePopup(document.body);
   let site: { pos: Vector3; lat: number; lon: number } | null = null;
   let siteToken = 0;
@@ -150,6 +150,7 @@ async function main() {
     if (moved > 5 || !quick) return;
     const hit = pickSurface(e.clientX, e.clientY);
     if (!hit) return;
+    dismissHint();
     const dir = hit.clone().normalize();
     site = {
       pos: hit,
