@@ -7,7 +7,7 @@ endif
 MAX_LEVEL ?= 11
 WORKERS ?= 24
 
-.PHONY: all venv download inspect basisu tiles overviews heights colour stars meta stats web build serve clean-tiles
+.PHONY: all venv download inspect basisu tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
 
 all: tiles build
 
@@ -38,7 +38,16 @@ stats:
 	$(PY) -I pipeline/build.py stats
 
 # full tile pyramid: heights (cube-sphere quadtree) + KTX2 colour + star cubemaps
-tiles: heights colour stars meta stats
+tiles: heights colour stars meta stats ephem earth
+
+# Sun/Earth state vectors seen from the Moon, 2000-2050, from the JPL Horizons API
+ephem:
+	$(PY) -I pipeline/ephemeris.py --start 2000 --end 2050 --validate
+
+# Earth texture for the sky (NASA Blue Marble, SVS 2915) -> web/public/sky/earth.jpg
+earth:
+	$(PY) -I pipeline/download.py --groups earth
+	$(PY) -I pipeline/build.py earth
 
 web:
 	cd web && npm install

@@ -13,7 +13,6 @@ export class Compass {
     const style = document.createElement('style');
     style.textContent = `
       .moon-compass {
-        position: fixed; right: 16px; bottom: 16px; z-index: 2;
         width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%;
         background: rgba(32, 33, 36, 0.86);
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);

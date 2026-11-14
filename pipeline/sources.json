@@ -178,6 +178,13 @@
    "urls": [
     "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_45N_200M.LBL"
    ]
+  },
+  {
+   "name": "bluemarble-2048.png",
+   "group": "earth",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a002900/a002915/bluemarble-2048.png"
+   ]
   }
  ]
 }

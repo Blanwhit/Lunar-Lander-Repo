@@ -194,6 +194,14 @@ export class TileNode {
   }
 }
 
+export interface LightParams {
+  sun: number;
+  ambient: number;
+  exposure: number;
+  earthDir: Vector3; // body-frame unit vector Moon -> Earth
+  earthshine: number;
+}
+
 export interface FrameInfo {
   camPos: Vec3;              // body frame, metres (float64)
   viewRot: Matrix3;          // body -> view
@@ -545,7 +553,7 @@ export class TileTree {
     return { tex: a.colourTex!, scale, ou: (n.x & m) * scale, ov: (n.y & m) * scale };
   }
 
-  meshFor(n: TileNode, fi: FrameInfo, P: number, light: Vector3, lightParams: { sun: number; ambient: number; exposure: number }): Mesh {
+  meshFor(n: TileNode, fi: FrameInfo, P: number, light: Vector3, lightParams: LightParams): Mesh {
     if (!n.mesh) {
       const F = FACES[n.face];
       const mat = new RawShaderMaterial({
@@ -577,6 +585,8 @@ export class TileTree {
           uSun: { value: 1 },
           uAmbient: { value: 0.02 },
           uExposure: { value: 1 },
+          uEarthDir: { value: new Vector3(1, 0, 0) },
+          uEarthshine: { value: 0 },
         },
       });
       n.mesh = new Mesh(tileGeometry(), mat);
@@ -605,6 +615,8 @@ export class TileTree {
     u.uSun.value = lightParams.sun;
     u.uAmbient.value = lightParams.ambient;
     u.uExposure.value = lightParams.exposure;
+    (u.uEarthDir.value as Vector3).copy(lightParams.earthDir);
+    u.uEarthshine.value = lightParams.earthshine;
     const dist = Math.hypot(n.centre[0] - fi.camPos[0], n.centre[1] - fi.camPos[1], n.centre[2] - fi.camPos[2]);
     n.mesh.renderOrder = 10 + Math.min(1e6, dist / 10); // front to back
     void this.tmpV;

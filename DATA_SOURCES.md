@@ -120,15 +120,44 @@ The pipeline resamples the map into an OpenGL-convention cubemap. It writes a 51
 for the first frames and a 2048² UASTC cubemap (about 1 face pixel per source pixel) that loads
 afterwards.
 
-## 5. Orientation
+## 5. Sun and Earth positions (time-dependent)
 
-The Moon (ME/PA body frame) is rotated into J2000 with the static IAU WGCCRE pole and prime
-meridian at J2000.0: α₀ = 269.9949°, δ₀ = 66.5392°, W = 38.3213°
-([Archinal et al. 2018](https://doi.org/10.1007/s10569-017-9805-5)). Time-dependent orientation from
-JPL Horizons or SPICE can be plugged in through `setOrientationProvider()` in
-[web/src/orientation.ts](web/src/orientation.ts).
+| Product | Publisher | URL | Version | Sampling | Frame | Size |
+|---|---|---|---|---|---|---|
+| **JPL Horizons** state vectors of the Sun (10) and the Earth (399) relative to the Moon's centre (`500@301`), `VEC_CORR='LT'` (light-time corrected), km and km/s | NASA/JPL Solar System Dynamics | API: https://ssd-api.jpl.nasa.gov/doc/horizons.html (endpoint `https://ssd.jpl.nasa.gov/api/horizons.api`) | fetched 2026-11-14 (DE441-based) | every 6 h, 2000-01-01 to 2051-01-01 TDB | ICRF (J2000 equatorial) | 51 × 69 KB = 3.6 MB |
 
-## 6. Tools
+This is the challenge's own Horizons resource. The API sends no CORS headers, so the pipeline
+([pipeline/ephemeris.py](pipeline/ephemeris.py)) fetches the data once and the static site ships
+it. The viewer cubic-Hermite interpolates positions and velocities. At a 6 h step the
+interpolation error is far below the Sun's and Earth's angular sizes.
+
+**Validation** (`python -I pipeline/ephemeris.py --validate`, which writes
+`web/public/ephem/validation.json`): the viewer's IAU Moon orientation applied to the Horizons
+vectors reproduces Horizons' own sub-Earth point on the Moon (`QUANTITIES='14'`, observer
+`500@399`) to **0.45′ mean, 0.76′ max** over 53 dates in 2026. The sub-solar point differs by a
+constant 4.3′. That is the Moon's rotation during the 8.3-minute Sun–Moon light time: Horizons
+gives the disc centre as the Sun sees it, while lighting at time t uses the Moon's orientation
+at t.
+
+## 6. Earth image
+
+| Product | Publisher | URL | Version | Resolution | Size |
+|---|---|---|---|---|---|
+| **Blue Marble**, seamless true-colour mosaic of the Earth (`bluemarble-2048.png`) | NASA Goddard SVS 2915 (Blue Marble imagery: NASA Earth Observatory, Reto Stöckli et al.) | https://svs.gsfc.nasa.gov/2915 | 2004 | 2048 × 1024, equirectangular, 180°W at the left edge | 1.5 MB → 82 KB JPEG (1024×512) |
+
+Public domain (NASA). Seen from the Moon the Earth is about 1.9° wide (~50 px at 1080p), so
+1024×512 is plenty. The Blue Marble Next Generation host (`eoimages.gsfc.nasa.gov`) wasn't
+reachable from the build machine, so the SVS copy was used.
+
+## 7. Orientation
+
+The Moon (ME/PA body frame) is rotated into J2000 with the full time-dependent IAU WGCCRE 2015
+model: α₀, δ₀ and W including the 13 periodic terms E1–E13
+([Archinal et al. 2018](https://doi.org/10.1007/s10569-017-9805-5)). UTC is converted to TDB via
+leap seconds. It is validated against JPL Horizons (section 5). SPICE PA attitude can be plugged in
+through `setOrientationProvider()` in [web/src/orientation.ts](web/src/orientation.ts).
+
+## 8. Tools
 
 * GDAL 3.12.2 (through rasterio 1.5.2). Used to cross-check the PDS3 labels and CRS (`LDEM_16`). Raw
   IMG files are read with numpy memmaps for windowed, out-of-core access.

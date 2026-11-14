@@ -2,15 +2,25 @@
 
 A static website that shows only the Moon, in 3D, against the real star sky. Terrain is streamed
 level-of-detail from raw NASA elevation data, from the whole globe down to **5 m/px at the lunar
-south pole**. The page is a full-screen canvas with no text; the only control is a compass.
+south pole**. The Sun and the Earth sit at their real positions in the sky for any date and time
+from 2000 to 2050 (JPL Horizons), and the Moon is lit by the Sun. The only interface is a slim
+bar along the bottom:
 
-* **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
+* **Scale bar** (bottom-left): ground distance at the centre of the view in metric units
+  (1/2/5 × 10ⁿ m or km, about 60–120 px wide).
+* **Date and time** (bottom-centre, UTC): ▲/▼ above and below each field (day, month, year,
+  hour, minute). Click to step, hold to repeat (it accelerates). The mouse wheel or the ↑/↓ and
+  PgUp/PgDn keys work on a focused field. The date order follows the browser's locale. Changing
+  the date to the 31st and then the month clamps to the month's length. The range is limited to
+  the ephemeris (2000-01-01 to 2050-12-31). It starts at the current time.
 * **Compass** (bottom-right, Google-Earth style): the red needle points to lunar north on
   screen; click it to turn the view back to north-up (position, zoom and tilt are kept).
+* **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
 * **Wheel / pinch**: zoom, from the whole Moon down to just above the surface. The view tilts
   towards the horizon automatically near the ground.
-* Optional deep link (no UI): `#lat,lon,distance_m[,heading_deg[,tilt_deg]]`. For example,
-  Shackleton crater is `#-89.67,129.8,25000,0,55`.
+* Optional deep link: `#lat,lon,distance_m[,heading_deg[,tilt_deg[,UTC time]]]`. For example,
+  Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
+  `#2,84,40000,270,82,2026-01-10T12:00Z`.
 
 ## Run
 
@@ -19,6 +29,8 @@ make venv          # Python 3.11+ venv with GDAL (rasterio), numpy, OpenEXR …
 make download      # ~11 GB of raw NASA data into data/raw (sizes printed first; refuses >5 GB/file)
 make basisu        # builds the Basis Universal encoder from source (g++)
 make tiles         # overviews -> height tiles -> colour KTX2 -> star cubemaps -> meta -> size report
+make ephem         # Sun/Earth ephemeris 2000-2050 from JPL Horizons (+ orientation validation)
+make earth         # Earth texture (NASA Blue Marble) for the sky
 make web build     # npm install + vite build  -> web/dist (static; tiles copied from web/public)
 make serve         # vite preview on :4173
 ```
@@ -54,6 +66,14 @@ Development server: `cd web && npm run dev`.
    encoded as KTX2/Basis ETC1S with mipmaps. Deeper tiles reuse the L5 texture with a UV transform.
 5. **Stars**: the SVS Deep Star Map (J2000) is resampled into OpenGL-convention cubemaps. A
    512² cubemap loads first and a 2048² one afterwards.
+6. **Ephemeris** ([ephemeris.py](pipeline/ephemeris.py)): the Horizons API sends no CORS
+   headers, so the browser can't query it live. The pipeline fetches Moon-centred (`500@301`),
+   light-time-corrected ICRF state vectors (position + velocity) of the Sun and the Earth every
+   6 h for 2000–2050. It stores them as one ~69 KB file per year in `web/public/ephem/` (3.6 MB in
+   total). `--validate` checks the viewer's Moon orientation against Horizons' own sub-Earth and
+   sub-solar points (see below).
+7. **Earth texture**: NASA Blue Marble (SVS 2915), downscaled to a 1024×512 JPEG (82 KB) in
+   `web/public/sky/`.
 
 ### Viewer (`web/`)
 * **Quadtree LOD** ([TileTree.ts](web/src/terrain/TileTree.ts)): each level L has a split distance
@@ -76,12 +96,27 @@ Development server: `cd web && npm run dev`.
   evicts GPU textures above the budget (384 MB).
 * **Render on demand**: a frame is drawn only when the camera moves, inertia is active, or a tile
   arrives.
-* **Lighting**: one fixed directional light (body frame: 1.5° above the south-pole horizon, from
-  60°E), a lunar-Lambert (Lommel-Seeliger/Lambert) BRDF, and a little ambient light.
-* **Orientation**: the static IAU pole (α₀ = 269.9949°, δ₀ = 66.5392°, W = 38.3213°) rotates the
-  J2000 star cubemap into the Moon's ME/PA frame. To add time-dependent orientation later, use the
-  `setOrientationProvider()` hook in [orientation.ts](web/src/orientation.ts) (JPL Horizons or
-  SPICE).
+* **Time and sky bodies** ([ephemeris.ts](web/src/ephemeris.ts), [time.ts](web/src/time.ts)): UTC
+  is converted to TDB using leap seconds plus 32.184 s. The yearly Horizons file is
+  cubic-Hermite interpolated from positions and velocities, then rotated into the Moon's body frame.
+  * **Sun**: drawn as a limb-darkened 0.53° disc with a glow.
+  * **Earth**: drawn as a sphere impostor. The Blue Marble texture is rotated by Greenwich
+    sidereal time and lit by the Sun, so it shows its real phase and the face turned towards the
+    Moon. It also has a thin atmosphere rim.
+  * Both directions are computed from the camera position rather than the Moon's centre, so the
+    parallax is exact when you're close to the Moon. Terrain naturally hides both below the
+    horizon.
+* **Lighting**: the Sun's direction comes from the ephemeris. The BRDF is lunar-Lambert with the
+  phase-dependent weight L(α) from McEwen (1996), so the surface is flat near full Moon and darker
+  looking into the Sun. Earthshine lights the night side, scaled by the Earth's phase as seen from
+  the Moon, and a very small ambient term is added.
+* **Orientation**: the full time-dependent IAU WGCCRE 2015 Moon model, including the 13 periodic
+  libration terms ([orientation.ts](web/src/orientation.ts)). It rotates the J2000 star cubemap
+  and the Horizons vectors into the Moon's ME/PA frame. Against Horizons over 2026, the sub-Earth
+  point agrees to 0.45′ mean and 0.76′ max. The sub-solar point differs by a constant 4.3′.
+  Horizons reports the Moon as the Sun sees it, 8.3 minutes earlier, while lighting at time t
+  needs the Moon's orientation at t, which the viewer uses. `setOrientationProvider()` can swap in
+  SPICE PA attitude.
 
 ## Tile pyramid and numbers
 
@@ -141,8 +176,8 @@ frame rate is 60 fps in every case.
 
 ### Initial payload (production build, measured)
 
-Everything fetched until the first frame that has all six L0 terrain tiles, their colour and the
-star background:
+Everything fetched until the first frame that has all six L0 terrain tiles, their colour, the
+star background and the Sun/Earth positions. The 80 KB Earth texture loads right after:
 
 | item | size |
 |---|---:|
@@ -151,9 +186,10 @@ star background:
 | L0 heights (6 tiles) | 262 KB |
 | L0 colour (6 tiles, ETC1S) | 147 KB |
 | 512² star cubemap | 293 KB |
-| **total** | **1.40 MB** (1.13 MB with gzipped wasm) |
+| Sun/Earth ephemeris for the current year (JPL Horizons) | 69 KB |
+| **total** | **1.47 MB** (1.20 MB with gzipped wasm) |
 
-On localhost the first full frame appears 0.35 s after the app starts. Refinement requests are held
+On localhost the first full frame, including the Sun and Earth, appears about 0.13–0.35 s after the app starts. Refinement requests are held
 back until the base level is complete. The 4.3 MB 2048² star cubemap is fetched only once the tile
 queue is idle.
 
@@ -175,12 +211,16 @@ queue is idle.
 
 ## Data credits
 
-The site stays text-free; credits live here and in [DATA_SOURCES.md](DATA_SOURCES.md).
+Credits live here and in [DATA_SOURCES.md](DATA_SOURCES.md); the page itself only shows the scale,
+date/time and compass.
 
 * **Elevation**: LRO LOLA gridded and polar DEMs (LOLA team, NASA GSFC / MIT, PDS Geosciences
   Node). SLDEM2015 LOLA + SELENE/Kaguya TC merged DEM (Barker et al. 2016; NASA GSFC PGDA / JAXA).
 * **Colour**: NASA Scientific Visualization Studio, CGI Moon Kit (2025 colour map). Based on the
   LROC WAC Hapke-normalised mosaic (NASA/GSFC/Arizona State University).
+* **Sun and Earth positions**: JPL Horizons (Solar System Dynamics group, NASA/JPL-Caltech),
+  DE441-based ephemerides via the Horizons API.
+* **Earth image**: NASA Blue Marble (NASA Earth Observatory / SVS 2915, Reto Stöckli et al.).
 * **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020 (Hipparcos-2, Tycho-2,
   Gaia DR2 / ESA/Gaia/DPAC).
 * Challenge: NASA Space Apps 2026, *Lunar Landing Site Navigator*. The resources it lists

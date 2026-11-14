@@ -351,6 +351,17 @@ def cmd_stars(args) -> None:
     (CACHE / "stars_files.json").write_text(json.dumps(files))
 
 
+# -------------------------------------------------------------------- earth
+def cmd_earth(args) -> None:
+    """NASA Blue Marble (SVS 2915) -> 1024x512 JPEG for the sky's Earth impostor"""
+    from PIL import Image
+    src = RAW / "bluemarble-2048.png"
+    dst = ROOT / "web" / "public" / "sky" / "earth.jpg"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    Image.open(src).convert("RGB").resize((1024, 512), Image.LANCZOS).save(dst, quality=88, optimize=True, progressive=True)
+    print(f"earth texture: {dst} ({human(dst.stat().st_size)})")
+
+
 # --------------------------------------------------------------------- meta
 def cmd_meta(args) -> None:
     stars = []
@@ -400,7 +411,7 @@ def cmd_stats(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["overviews", "heights", "colour", "stars", "meta", "stats", "all"])
+    ap.add_argument("cmd", choices=["overviews", "heights", "colour", "stars", "earth", "meta", "stats", "all"])
     ap.add_argument("--max-level", type=int, default=None)
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 4))
     args = ap.parse_args()

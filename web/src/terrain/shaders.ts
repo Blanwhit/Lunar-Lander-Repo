@@ -113,6 +113,8 @@ uniform vec3 uLight;         // body-frame unit vector towards the light
 uniform float uSun;          // light intensity
 uniform float uAmbient;
 uniform float uExposure;
+uniform vec3 uEarthDir;      // body-frame unit vector towards the Earth
+uniform float uEarthshine;   // earthshine intensity (scaled by the Earth's phase)
 
 out vec4 fragColor;
 
@@ -138,12 +140,17 @@ void main() {
   vec3 V = normalize(-vRel);
   float mu0 = max(dot(n, uLight), 0.0);
   float mu = max(dot(n, V), 0.0);
-  // lunar-Lambert: mix of Lommel-Seeliger (dominant for the Moon) and Lambert
+  // lunar-Lambert with McEwen (1996) phase-dependent weight L(alpha):
+  // Lommel-Seeliger near opposition (flat full Moon), Lambert-like towards the Sun
   float ls = 2.0 * mu0 / (mu0 + mu + 1e-4);
-  float f = mix(mu0, ls, 0.55);
+  float a = degrees(acos(clamp(dot(uLight, V), -1.0, 1.0)));
+  float Lw = clamp(1.0 - 0.019 * a + 2.42e-4 * a * a - 1.46e-6 * a * a * a, 0.0, 1.0);
+  float f = mix(mu0, ls, Lw);
   // large-scale terminator from the sphere normal (normal maps cannot light the night side)
   f *= smoothstep(-0.03, 0.06, dot(up, uLight));
-  vec3 c = albedo * (f * uSun + uAmbient) * uExposure;
+  // earthshine: sunlight reflected by the Earth lights the lunar night side (Lambert)
+  float fe = max(dot(n, uEarthDir), 0.0) * smoothstep(-0.05, 0.1, dot(up, uEarthDir));
+  vec3 c = albedo * (f * uSun + fe * uEarthshine + uAmbient) * uExposure;
   // gentle shoulder to avoid harsh clipping
   c = c / (1.0 + 0.15 * c);
   fragColor = vec4(toSRGB(c), 1.0);
@@ -154,24 +161,82 @@ export const skyVS = /* glsl */ `
 precision highp float;
 in vec2 position;
 uniform mat3 uInvViewRot;   // view -> body
-uniform mat3 uBodyToJ2000;
 uniform vec2 uTanHalf;      // (tan(fovx/2), tan(fovy/2))
-out vec3 vDirJ;
+out vec3 vDirB;
 void main() {
   vec3 dView = vec3(position * uTanHalf, -1.0);
-  vDirJ = uBodyToJ2000 * (uInvViewRot * dView);
+  vDirB = uInvViewRot * dView;
   gl_Position = vec4(position, 1.0, 1.0);
 }
 `;
 
+// Background sky in the lunar body frame: star cubemap (ICRF), the Sun (limb-darkened
+// disc + glow) and the Earth (sphere impostor: Blue Marble texture rotated by sidereal
+// time, lit by the Sun -> correct phase, thin atmosphere rim). Directions are given
+// relative to the camera, so parallax near the Moon is exact.
 export const skyFS = /* glsl */ `
 precision highp float;
-in vec3 vDirJ;
+in vec3 vDirB;
 uniform samplerCube uStars;
+uniform mat3 uBodyToJ2000;
 uniform float uStarGain;
+uniform vec4 uSun;          // xyz: direction (body), w: angular radius (rad); w = 0 -> hidden
+uniform vec4 uEarth;        // xyz: direction (body), w: angular radius (rad); w = 0 -> hidden
+uniform vec3 uEarthSun;     // body-frame direction from the Earth to the Sun
+uniform sampler2D uEarthTex;
+uniform float uEarthTexReady;
+uniform float uGmst;        // Greenwich sidereal angle (rad)
+uniform float uPixelAngle;  // angular size of one pixel (rad), for anti-aliased edges
 out vec4 fragColor;
+
+const float PI = 3.14159265359;
+
+vec3 toSRGB(vec3 c) {
+  c = max(c, 0.0);
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
 void main() {
-  vec3 c = texture(uStars, normalize(vDirJ)).rgb * uStarGain;
+  vec3 d = normalize(vDirB);
+  vec3 c = texture(uStars, uBodyToJ2000 * d).rgb * uStarGain;   // display-referred
+
+  // ---- Sun
+  if (uSun.w > 0.0) {
+    float ang = acos(clamp(dot(d, uSun.xyz), -1.0, 1.0));
+    float r = ang / uSun.w;
+    float edge = clamp((uSun.w - ang) / uPixelAngle + 0.5, 0.0, 1.0);
+    float mu = sqrt(max(1.0 - r * r, 0.0));
+    vec3 disc = vec3(1.0, 0.97, 0.92) * (0.6 + 0.4 * mu);            // limb darkening
+    float glow = 0.6 * exp(-(r - 1.0) * 1.2) + 0.06 * pow(1.0 / max(r, 1.0), 1.2);
+    c = mix(c + vec3(1.0, 0.93, 0.82) * glow * step(1.0, r), disc, edge);
+  }
+
+  // ---- Earth
+  if (uEarth.w > 0.0) {
+    float ce = dot(d, uEarth.xyz);
+    float ang = acos(clamp(ce, -1.0, 1.0));
+    float r = ang / uEarth.w;
+    if (r < 1.08) {
+      vec3 q = (d - uEarth.xyz * ce) / sin(uEarth.w);                 // |q| = r
+      float rr = min(dot(q, q), 1.0);
+      vec3 n = q - uEarth.xyz * sqrt(1.0 - rr);                       // sphere normal (body)
+      float sunDot = dot(normalize(n), uEarthSun);
+      vec3 nj = uBodyToJ2000 * normalize(n);                          // ICRF ~ Earth equatorial
+      float lon = atan(nj.y, nj.x) - uGmst;
+      float lat = asin(clamp(nj.z, -1.0, 1.0));
+      vec2 uv = vec2(fract(lon / (2.0 * PI) + 0.5), 0.5 + lat / PI);
+      vec3 alb = uEarthTexReady > 0.5 ? texture(uEarthTex, uv).rgb : vec3(0.12, 0.2, 0.35);
+      float day = smoothstep(-0.08, 0.12, sunDot);
+      vec3 lit = alb * (max(sunDot, 0.0) * 1.15 + 0.004) * day;
+      // atmosphere: bluish brightening towards the lit limb + thin halo outside the disc
+      float limb = pow(1.0 - sqrt(1.0 - rr), 2.0);
+      lit += vec3(0.25, 0.45, 1.0) * limb * 0.35 * day;
+      vec3 earth = toSRGB(lit);
+      float edge = clamp((uEarth.w - ang) / uPixelAngle + 0.5, 0.0, 1.0);
+      float halo = smoothstep(1.08, 1.0, r) * step(1.0, r) * 0.35 * smoothstep(-0.2, 0.3, dot(normalize(d - uEarth.xyz * ce), uEarthSun));
+      c = mix(c + vec3(0.3, 0.5, 1.0) * halo, earth, edge);
+    }
+  }
   fragColor = vec4(c, 1.0);
 }
 `;
