@@ -7,7 +7,7 @@ endif
 MAX_LEVEL ?= 11
 WORKERS ?= 24
 
-.PHONY: all venv download inspect basisu tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
+.PHONY: all venv download pack unpack inspect basisu tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
 
 all: tiles build
 
@@ -16,6 +16,13 @@ venv:
 
 download:
 	$(PY) -I pipeline/download.py --workers 16
+
+# lossless, SHA-256-verified compression of data/raw -> data/raw_packed (about 2x smaller)
+pack:
+	$(PY) -I pipeline/pack_raw.py pack
+# restore the exact original raw files (needed before overviews/heights/colour/stars)
+unpack:
+	$(PY) -I pipeline/pack_raw.py unpack
 
 inspect:
 	$(PY) -I pipeline/inspect_data.py

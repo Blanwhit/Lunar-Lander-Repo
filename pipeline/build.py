@@ -368,6 +368,8 @@ def cmd_meta(args) -> None:
     sf = CACHE / "stars_files.json"
     if sf.exists():
         stars = json.loads(sf.read_text())
+    elif OUT.exists():  # cache cleaned: fall back to the cubemaps already in the output
+        stars = sorted((p.name for p in OUT.glob("stars_*.ktx2")), key=lambda n: int(n[6:-5]))
     max_level = 0
     for p in (OUT / "h").iterdir() if (OUT / "h").exists() else []:
         max_level = max(max_level, int(p.name))
