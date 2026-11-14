@@ -455,6 +455,7 @@ export class TileTree {
     n.updateBounds();
     const ht = new DataTexture(r.q, GRID, GRID, RedIntegerFormat, UnsignedShortType);
     ht.internalFormat = 'R16UI';
+    ht.unpackAlignment = 2; // 259 * 2 bytes per row is not 4-byte aligned
     ht.minFilter = ht.magFilter = NearestFilter;
     ht.generateMipmaps = false;
     ht.needsUpdate = true;

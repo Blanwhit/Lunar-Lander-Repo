@@ -29,13 +29,13 @@ import zlib
 
 import numpy as np
 
-from .geom import GRID, R_MOON, dirs_to_latlon, height_grid, tile_cell_size, tile_probe
+from .geom import GRID, R_MOON, dirs_to_latlon, face_dirs, height_ab, local_cell, tile_cell_size, tile_probe
 
 MAGIC = b"MLH1"
 HEADER = struct.Struct("<4sBBBBIIffffHH")
 
 
-def composite_heights(sources, lat, lon, cell_m: float) -> np.ndarray:
+def composite_heights(sources, lat, lon, cell_m) -> np.ndarray:
     h = None
     for s in sources:
         w = s.weight(lat).astype(np.float32)
@@ -58,15 +58,18 @@ def composite_heights(sources, lat, lon, cell_m: float) -> np.ndarray:
 
 
 def build_heights(sources, level: int, face: int, x: int, y: int) -> np.ndarray:
-    d = height_grid(level, face, x, y)
-    lat, lon = dirs_to_latlon(d)
-    cell = tile_cell_size(level, face, x, y)
+    A, B = height_ab(level, x, y)
+    lat, lon = dirs_to_latlon(face_dirs(face, A, B))
+    cell = local_cell(level, A, B)  # per-sample footprint -> seamless mip selection
     return composite_heights(sources, lat, lon, cell)
 
 
 def step_for_level(cell_m: float) -> float:
+    """Height quantum ~ cell/256 (power of two): constant ~0.2 deg slope precision at
+    every level -> coarse levels (initial load) compress much better, fine levels keep
+    cm precision. Clamped to [1/32 m, 32 m]."""
     s = 2.0 ** np.round(np.log2(cell_m / 256.0))
-    return float(np.clip(s, 1.0 / 32.0, 0.5))
+    return float(np.clip(s, 1.0 / 32.0, 32.0))
 
 
 def encode(level: int, face: int, x: int, y: int, h: np.ndarray, child_mask: int, cell_m: float) -> bytes:
@@ -136,9 +139,10 @@ def tile_wanted(sources, cfg: dict, level: int, face: int, x: int, y: int) -> bo
 
 
 def child_mask(sources, cfg, level, face, x, y) -> int:
-    m = 0
+    """All-or-nothing: if any child adds detail, all four are generated, so the viewer
+    can always replace a parent by its complete set of children."""
     for cy in range(2):
         for cx in range(2):
             if tile_wanted(sources, cfg, level + 1, face, 2 * x + cx, 2 * y + cy):
-                m |= 1 << ((cy << 1) | cx)
-    return m
+                return 0b1111
+    return 0

@@ -21,7 +21,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 300.0
   },
   {
    "name": "ldem45n",
@@ -32,7 +33,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 300.0
   },
   {
    "name": "sldem128",
@@ -48,7 +50,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 180.0
   },
   {
    "name": "ldem60n",
@@ -58,7 +61,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 180.0
   },
   {
    "name": "ldem75s",
@@ -68,7 +72,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 90.0
   },
   {
    "name": "ldem75n",
@@ -78,7 +83,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 90.0
   },
   {
    "name": "ldem80s",
@@ -88,7 +94,8 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 30.0
   },
   {
    "name": "ldem875s",
@@ -98,13 +105,21 @@
    "polar_flip": [
     1,
     1
-   ]
+   ],
+   "despike_m": 15.0
   }
  ],
  "colour": {
   "exr": "lroc_color.exr",
   "exposure_percentile": 99.7,
-  "white": 0.92
+  "white": 0.92,
+  "basis": [
+   "-uastc",
+   "-uastc_level",
+   "2",
+   "-uastc_rdo_l",
+   "1.0"
+  ]
  },
  "stars": {
   "exr": "starmap_2020_8k.exr",

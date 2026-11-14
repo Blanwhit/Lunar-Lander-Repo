@@ -78,12 +78,13 @@ def _build_one(key):
     L, f, x, y = key
     sources, cfg = _SOURCES
     p = _height_path(L, f, x, y)
+    m = child_mask(sources, cfg, L, f, x, y)
     if p.exists():
         meta, _ = decode_header(p.read_bytes())
-        return key, p.stat().st_size, meta["child_mask"], True
+        if meta["child_mask"] == m:  # still valid for this max_level
+            return key, p.stat().st_size, m, True
     cell = geom.tile_cell_size(L, f, x, y)
     h = build_heights(sources, L, f, x, y)
-    m = child_mask(sources, cfg, L, f, x, y)
     blob = encode(L, f, x, y, h, m, cell)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
@@ -173,40 +174,76 @@ def load_colour_srgb() -> np.ndarray:
 
 
 def colour_pyramid(base: np.ndarray, levels: int) -> list[np.ndarray]:
-    """linear-light 2x2 box pyramid of the sRGB map, as uint8 sRGB arrays in RAM."""
+    """linear-light 2x2 box pyramid of the sRGB map, cached as uint8 sRGB memmaps."""
     import cv2
     pyr = [base]
     cur = base
-    for _ in range(levels):
+    for k in range(1, levels + 1):
         h, w = cur.shape[0] // 2, cur.shape[1] // 2
-        lin = (np.asarray(cur).astype(np.float32) / 255.0) ** 2.2
-        lin = cv2.resize(lin, (w, h), interpolation=cv2.INTER_AREA)
-        cur = np.round(np.clip(lin, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+        path = CACHE / f"colour_srgb_ov{k}.u8"
+        if not path.exists():
+            lin = (np.asarray(cur).astype(np.float32) / 255.0) ** 2.2
+            lin = cv2.resize(lin, (w, h), interpolation=cv2.INTER_AREA)
+            arr = np.round(np.clip(lin, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+            tmp = path.with_suffix(".tmp")
+            arr.tofile(tmp)
+            tmp.replace(path)
+        cur = np.memmap(path, dtype=np.uint8, mode="r", shape=(h, w, 3))
         pyr.append(cur)
     return pyr
 
 
-def sample_colour(pyr: list[np.ndarray], lat: np.ndarray, lon: np.ndarray, cell_m: float) -> np.ndarray:
-    H0, W0 = pyr[0].shape[:2]
-    res0 = np.pi * geom.R_MOON * 2 / W0
-    k = 0
-    while k + 1 < len(pyr) and res0 * 2 ** (k + 1) <= cell_m:
-        k += 1
-    img = pyr[k]
+_PYR = None
+
+
+def _colour_init() -> None:
+    global _PYR
+    _PYR = colour_pyramid(load_colour_srgb(), 7)
+
+
+def _colour_one(key) -> str:
+    from PIL import Image
+    L, f, x, y = key
+    A, B = geom.colour_ab(L, x, y)
+    lat, lon = geom.dirs_to_latlon(geom.face_dirs(f, A, B))
+    rgb = sample_colour(_PYR, lat, lon, geom.local_cell(L, A, B, geom.COLOUR_N - 1))
+    p = CACHE / "colour_png" / f"{L}_{f}_{y}_{x}.png"
+    Image.fromarray(rgb).save(p)
+    return str(p)
+
+
+def _sample_colour_level(img: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """bilinear sample (linear light, float32 RGB) of one pyramid level."""
     H, W = img.shape[:2]
-    # map centred on 0 deg longitude: column 0 at lon -180
+    # map centred on 0 deg longitude: column 0 at lon -180 (verified, see DATA_SOURCES.md)
     col = ((lon + 180.0) % 360.0) / 360.0 * W - 0.5
     row = (90.0 - lat) / 180.0 * H - 0.5
     c0 = np.floor(col).astype(np.int64)
     r0 = np.clip(np.floor(row).astype(np.int64), 0, H - 2)
-    fc = (col - c0)[..., None]
-    fr = np.clip(row - r0, 0, 1)[..., None]
+    fc = (col - c0)[..., None].astype(np.float32)
+    fr = np.clip(row - r0, 0, 1)[..., None].astype(np.float32)
     c1 = (c0 + 1) % W
     c0 = c0 % W
-    lin = lambda a: (a.astype(np.float32) / 255.0) ** 2.2  # noqa: E731
-    v = (lin(img[r0, c0]) * (1 - fc) + lin(img[r0, c1]) * fc) * (1 - fr) + \
-        (lin(img[r0 + 1, c0]) * (1 - fc) + lin(img[r0 + 1, c1]) * fc) * fr
-    return np.round(np.clip(v, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+    lut = (np.arange(256, dtype=np.float32) / 255.0) ** 2.2
+    g = lambda r, c: lut[img[r, c]]  # noqa: E731
+    return (g(r0, c0) * (1 - fc) + g(r0, c1) * fc) * (1 - fr) + (g(r0 + 1, c0) * (1 - fc) + g(r0 + 1, c1) * fc) * fr
+
+
+def sample_colour(pyr: list[np.ndarray], lat: np.ndarray, lon: np.ndarray, cell_m: np.ndarray) -> np.ndarray:
+    """trilinear (per-pixel footprint) colour sample -> sRGB uint8."""
+    W0 = pyr[0].shape[1]
+    res0 = np.pi * geom.R_MOON * 2 / W0
+    kf = np.clip(np.log2(np.maximum(cell_m, 1e-9) / res0), 0, len(pyr) - 1)
+    k0 = np.floor(kf).astype(np.int64)
+    t = (kf - k0)[..., None].astype(np.float32)
+    out = np.zeros(lat.shape + (3,), np.float32)
+    levels = {k: _sample_colour_level(pyr[k], lat, lon) for k in range(int(k0.min()), min(len(pyr) - 1, int(k0.max()) + 1) + 1)}
+    for k in np.unique(k0):
+        m = k0 == k
+        a = levels[int(k)][m]
+        b = levels[min(int(k) + 1, len(pyr) - 1)][m]
+        out[m] = a * (1 - t[m]) + b * t[m]
+    return np.round(np.clip(out, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
 
 
 def _basisu(files: list[Path], out_dir: Path, extra: list[str]) -> None:
@@ -218,48 +255,30 @@ def _basisu(files: list[Path], out_dir: Path, extra: list[str]) -> None:
 
 
 def cmd_colour(args) -> None:
-    from PIL import Image
     max_level = args.max_level if args.max_level is not None else CFG["colour_max_level"]
-    base = load_colour_srgb()
-    pyr = colour_pyramid(base, 7)
+    _colour_init()  # builds / caches the pyramid once in the parent
     png_dir = CACHE / "colour_png"
+    png_dir.mkdir(parents=True, exist_ok=True)
     ktx_tmp = CACHE / "colour_ktx2"
-    stats = {}
-    for L in range(max_level + 1):
-        t = time.time()
-        n = 1 << L
-        pngs = []
-        for f in range(6):
-            for y in range(n):
-                for x in range(n):
-                    out = OUT / "c" / str(L) / str(f) / str(y) / f"{x}.ktx2"
-                    if out.exists():
-                        continue
-                    d = geom.colour_grid(L, f, x, y)
-                    lat, lon = geom.dirs_to_latlon(d)
-                    rgb = sample_colour(pyr, lat, lon, geom.tile_cell_size(L, f, x, y))
-                    p = png_dir / f"{L}_{f}_{y}_{x}.png"
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(rgb).save(p)
-                    pngs.append(p)
-        # compress in parallel batches
-        batches = [pngs[i:i + 48] for i in range(0, len(pngs), 48)]
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 4))) as ex:
-            list(ex.map(lambda b: _basisu(b, ktx_tmp, ["-q", "190", "-comp_level", "2"]), batches))
-        nbytes = 0
-        for p in pngs:
-            _, f, y, x = p.stem.split("_")
-            src = ktx_tmp / (p.stem + ".ktx2")
-            dst = OUT / "c" / str(L) / f / y / f"{x}.ktx2"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(src, dst)
-            p.unlink()
-        for f in range(6):
-            for p in (OUT / "c" / str(L) / str(f)).rglob("*.ktx2"):
-                nbytes += p.stat().st_size
-        stats[L] = nbytes
-        print(f"colour L{L}: {6 * n * n:6d} tiles {human(nbytes):>10s}  {time.time() - t:.1f} s", flush=True)
+    from concurrent.futures import ThreadPoolExecutor
+    with Pool(args.workers, initializer=_colour_init) as pool:
+        for L in range(max_level + 1):
+            t = time.time()
+            n = 1 << L
+            keys = [(L, f, x, y) for f in range(6) for y in range(n) for x in range(n)
+                    if not (OUT / "c" / str(L) / str(f) / str(y) / f"{x}.ktx2").exists()]
+            pngs = [Path(p) for p in pool.imap_unordered(_colour_one, keys, chunksize=8)]
+            batches = [pngs[i:i + 48] for i in range(0, len(pngs), 48)]
+            with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 4))) as ex:
+                list(ex.map(lambda b: _basisu(b, ktx_tmp, CFG["colour"]["basis"]), batches))
+            for p in pngs:
+                _, f, y, x = p.stem.split("_")
+                dst = OUT / "c" / str(L) / f / y / f"{x}.ktx2"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(ktx_tmp / (p.stem + ".ktx2"), dst)
+                p.unlink()
+            nbytes = sum(p.stat().st_size for p in (OUT / "c" / str(L)).rglob("*.ktx2"))
+            print(f"colour L{L}: {6 * n * n:6d} tiles {human(nbytes):>10s}  {time.time() - t:.1f} s", flush=True)
 
 
 # -------------------------------------------------------------------- stars

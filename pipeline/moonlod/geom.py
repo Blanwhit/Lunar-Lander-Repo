@@ -12,7 +12,8 @@ Conventions -- keep in sync with web/src/geom.ts
 * Height tiles: TILE_N = 256 cells -> 257 vertices; stored with a 1-sample border
   => GRID = 259 samples per side; sample index k in [0, 259) is vertex i = k - 1,
   a = a0 + i / 256 * (a1 - a0).
-* Colour tiles: 256 x 256 pixel-centred: a = a0 + (k + 0.5) / 256 * (a1 - a0).
+* Colour tiles: 256 x 256 corner-aligned (edge texels lie on the tile boundary and are
+  shared with the neighbour -> seamless bilinear): a = a0 + k / 255 * (a1 - a0).
 """
 from __future__ import annotations
 
@@ -76,21 +77,43 @@ def dir_to_face(d: np.ndarray) -> tuple[int, float, float]:
     return best, float(np.arctan(s) * 4 / np.pi), float(np.arctan(t) * 4 / np.pi)
 
 
-def height_grid(level: int, face: int, x: int, y: int) -> np.ndarray:
-    """(GRID, GRID, 3) directions of the height samples (row = b index, col = a index)."""
+def height_ab(level: int, x: int, y: int) -> tuple[np.ndarray, np.ndarray]:
     a0, a1, b0, b1 = tile_bounds(level, x, y)
     i = np.arange(-1, TILE_N + 2, dtype=np.float64)
     a = a0 + i / TILE_N * (a1 - a0)
     b = b0 + i / TILE_N * (b1 - b0)
-    A, B = np.meshgrid(a, b)
+    return np.meshgrid(a, b)
+
+
+def height_grid(level: int, face: int, x: int, y: int) -> np.ndarray:
+    """(GRID, GRID, 3) directions of the height samples (row = b index, col = a index)."""
+    A, B = height_ab(level, x, y)
     return face_dirs(face, A, B)
+
+
+def colour_ab(level: int, x: int, y: int, n: int = COLOUR_N) -> tuple[np.ndarray, np.ndarray]:
+    a0, a1, b0, b1 = tile_bounds(level, x, y)
+    k = np.arange(n, dtype=np.float64) / (n - 1)
+    return np.meshgrid(a0 + k * (a1 - a0), b0 + k * (b1 - b0))
 
 
 def colour_grid(level: int, face: int, x: int, y: int, n: int = COLOUR_N) -> np.ndarray:
-    a0, a1, b0, b1 = tile_bounds(level, x, y)
-    k = (np.arange(n, dtype=np.float64) + 0.5) / n
-    A, B = np.meshgrid(a0 + k * (a1 - a0), b0 + k * (b1 - b0))
+    A, B = colour_ab(level, x, y, n)
     return face_dirs(face, A, B)
+
+
+def local_cell(level: int, a: np.ndarray, b: np.ndarray, n: int = TILE_N) -> np.ndarray:
+    """Analytic ground footprint (m) of one sample at face coords (a, b) on a grid with
+    n samples per tile side at `level`: max of the EAC arc lengths along a and b.
+    Depends only on (level, a, b), so samples shared by adjacent tiles get identical
+    values -> identical mip selection -> seamless tile edges."""
+    s = np.tan(np.pi / 4 * a)
+    t = np.tan(np.pi / 4 * b)
+    c2 = 1 + s * s + t * t
+    da = np.pi / 4 * (1 + s * s) * np.sqrt(1 + t * t) / c2
+    db = np.pi / 4 * (1 + t * t) * np.sqrt(1 + s * s) / c2
+    step = 2.0 / (1 << level) / n
+    return R_MOON * step * np.maximum(da, db)
 
 
 def tile_cell_size(level: int, face: int, x: int, y: int) -> float:

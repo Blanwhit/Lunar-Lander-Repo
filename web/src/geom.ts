@@ -8,7 +8,11 @@
 export const R_MOON = 1737400; // m
 export const TILE_N = 256; // cells per tile side (257 vertices)
 export const GRID = TILE_N + 3; // 259 stored height samples (1-sample border)
-export const MESH_N = 128; // mesh cells per tile side (vertex every 2nd height sample)
+// mesh cells per tile side (power of two <= TILE_N). The vertex shader samples every
+// TILE_N/MESH_N-th height texel; lighting always uses the full-resolution normal map.
+// Overridable for A/B tests with ?mesh=N (no UI).
+const meshParam = typeof location !== 'undefined' ? Number(new URLSearchParams(location.search).get('mesh')) : 0;
+export const MESH_N = [16, 32, 64, 128].includes(meshParam) ? meshParam : 64;
 export const H_MIN_GLOBAL = -9200; // lowest point on the Moon (m, vs 1737.4 km) ~ Antoniadi
 export const H_MAX_GLOBAL = 10800;
 

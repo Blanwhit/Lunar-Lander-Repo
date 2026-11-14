@@ -63,6 +63,17 @@ equirectangular PDS product, but the 32 tiles would need multi-tile support.
 - Polar stereographic orientation was checked for every polar product against LDEM_64. The RMS is
   11–20 m with the label-derived formula. All 3 alternative axis flips give 1.3–4 km.
 
+**Despiking (LOLA polar grids only).** The gridded LOLA polar DEMs contain isolated single-sample
+outliers from the gridding. 1,105 samples in `LDEM_875S_5M` and about 19,000 in `LDEM_80S_20M`
+deviate from their 4-neighbour mean by more than 25 m, one by −108 m. At the 5 m level they render
+as needle-like spikes.
+
+The pipeline (`despike_m` in [config.json](pipeline/config.json)) replaces a sample with its 3×3
+median only when it deviates from that median by more than max(15 m, 1.5 × the grid spacing). That
+is 15 m for the 5 m grid and 30 m for the 20 m grid, and it touches about 0.0001% of samples.
+SLDEM2015 and LDEM_64 are used unmodified. To get the untouched LOLA values for analysis, set
+`despike_m` to 0.
+
 **Seam blending.** [pipeline/moonlod/heights.py](pipeline/moonlod/heights.py) composites the
 sources from coarse to fine. Each finer source fades in over a latitude band inside its coverage
 edge:

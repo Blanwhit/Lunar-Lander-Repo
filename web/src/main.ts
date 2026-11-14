@@ -11,6 +11,7 @@ import {
   Mesh,
   RawShaderMaterial,
   Scene,
+  Sphere,
   Texture,
   Vector3,
   WebGLRenderer,
@@ -18,6 +19,7 @@ import {
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { GlobeControls } from './controls';
 import { R_MOON, H_MAX_GLOBAL, latLonToDir } from './geom';
+void H_MAX_GLOBAL;
 import { moonOrientation } from './orientation';
 import { skyFS, skyVS } from './terrain/shaders';
 import { TileTree, type FrameInfo } from './terrain/TileTree';
@@ -73,6 +75,7 @@ async function main() {
   // ---- sky
   const skyGeo = new BufferGeometry();
   skyGeo.setAttribute('position', new BufferAttribute(new Float32Array([-1, -1, 3, -1, -1, 3]), 2));
+  skyGeo.boundingSphere = new Sphere(new Vector3(), 1e30); // 2D clip-space triangle, never culled
   const skyMat = new RawShaderMaterial({
     glslVersion: GLSL3,
     vertexShader: skyVS,
@@ -138,8 +141,13 @@ async function main() {
     requestAnimationFrame(render);
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
+    renderFrame(dt, false);
+  }
+
+  /** advance controls by dt and draw if anything changed (or when forced) */
+  function renderFrame(dt: number, force: boolean) {
     const moved = controls.update(dt);
-    if (!moved && !needsRender && !controls.isAnimating()) return;
+    if (!force && !moved && !needsRender && !controls.isAnimating()) return;
     needsRender = false;
     const t0 = performance.now();
     frame++;
@@ -151,7 +159,8 @@ async function main() {
     // dynamic near/far: near ~ fraction of the height above the highest terrain below us
     const hTerrain = tree.heightAt([st.camPos[0] / camR, st.camPos[1] / camR, st.camPos[2] / camR]) ?? 0;
     const alt = Math.max(1, camR - R_MOON - hTerrain);
-    const near = Math.max(0.5, Math.min(alt * 0.4, Math.max(1, camR - R_MOON - H_MAX_GLOBAL) * 0.9));
+    // nearest visible surface is rarely closer than ~1/4 of the height above the ground below
+    const near = Math.max(0.5, alt * 0.25);
     const rMax = R_MOON + H_MAX_GLOBAL;
     const far = Math.sqrt(Math.max(0, camR * camR - (R_MOON - 9200) ** 2)) + Math.sqrt(rMax * rMax - (R_MOON - 9200) ** 2) + 1000;
     const f = 1 / Math.tan(FOV_Y / 2);
@@ -162,9 +171,12 @@ async function main() {
       0, 0, -1, 0,
     );
 
-    const fi: FrameInfo = { camPos: st.camPos, viewRot: st.viewRot, proj, viewportHeight: h, fovY: FOV_Y, frame };
+    // LOD is driven by CSS pixels so high-DPI screens don't quadruple the tile count
+    // (the extra device pixels still get MSAA + full-resolution normal maps)
+    const lodH = h / renderer.getPixelRatio();
+    const fi: FrameInfo = { camPos: st.camPos, viewRot: st.viewRot, proj, viewportHeight: lodH, fovY: FOV_Y, frame };
     const tiles = tree.update(fi);
-    const P = h / (2 * Math.tan(FOV_Y / 2));
+    const P = lodH / (2 * Math.tan(FOV_Y / 2));
 
     scene.clear();
     if (sky.visible) {
@@ -178,6 +190,8 @@ async function main() {
     perf.frameMs = performance.now() - t0;
   }
   requestAnimationFrame(render);
+  // debug/measurement hook (no UI): step(dt) renders one frame even when rAF is paused
+  (window as any).__moon.step = (dt = 1 / 60) => renderFrame(dt, true);
 
   // fps counter (only counts rendered frames; readable via window.__moon.perf)
   setInterval(() => {

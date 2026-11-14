@@ -31,6 +31,7 @@ uniform float uR;
 out vec2 vUv;               // tile-local [0,1]
 out vec3 vDir;              // body-frame unit direction (for the tangent frame)
 out vec3 vRel;              // camera-relative position (body frame)
+out float vMorph;           // CDLOD morph factor -> texture LOD bias (detail blends with geometry)
 
 const float QPI = 0.78539816339;
 
@@ -38,9 +39,9 @@ float fetchH(ivec2 t) {
   return uHQ.x + float(texelFetch(uHeight, t, 0).r) * uHQ.y;
 }
 
-// bilinear height at mesh coordinate g (mesh vertex g <-> height texel 2g + 1)
+// bilinear height at mesh coordinate g (mesh vertex g <-> height texel g * stride + 1)
 float heightAt(vec2 g) {
-  vec2 t = g * 2.0 + 1.0;
+  vec2 t = g * (256.0 / uTile.w) + 1.0;
   vec2 f = fract(t);
   ivec2 i = ivec2(floor(t));
   float h00 = fetchH(i);
@@ -88,6 +89,7 @@ void main() {
   vec3 rel = uOrigin + uR * dd + h * dir;
 
   vUv = uv;
+  vMorph = morph;
   vDir = dir;
   vRel = rel;
   gl_Position = uProj * vec4(uViewRot * rel, 1.0);
@@ -100,6 +102,7 @@ precision highp float;
 in vec2 vUv;
 in vec3 vDir;
 in vec3 vRel;
+in float vMorph;
 
 uniform sampler2D uNormal;   // RG16F 257x257 tangent-space normal (e1, e2)
 uniform sampler2D uColour;   // sRGB albedo (decoded to linear by the sampler)
@@ -122,12 +125,14 @@ void main() {
   vec3 e1 = normalize(uU - up * dot(uU, up));
   vec3 e2 = cross(up, e1);
   vec2 nuv = (vUv * 256.0 + 0.5) / 257.0;
-  vec2 nt = texture(uNormal, nuv).rg;
+  // bias by the morph factor: at morph = 1 the tile shows its parent's texel density
+  vec2 nt = texture(uNormal, nuv, vMorph).rg;
   float nz = sqrt(max(1.0 - dot(nt, nt), 0.0));
   vec3 n = normalize(nt.x * e1 + nt.y * e2 + nz * up);
 
-  vec2 cuv = uColourXf.yz + vUv * uColourXf.x;
-  vec3 albedo = texture(uColour, cuv).rgb;
+  // corner-aligned colour texels: tile uv 0..1 -> texel centres 0.5..255.5
+  vec2 cuv = ((uColourXf.yz + vUv * uColourXf.x) * 255.0 + 0.5) / 256.0;
+  vec3 albedo = texture(uColour, cuv, vMorph).rgb;
 
   vec3 V = normalize(-vRel);
   float mu0 = max(dot(n, uLight), 0.0);

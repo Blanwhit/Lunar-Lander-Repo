@@ -52,6 +52,7 @@ class Source:
     map_scale: float = 0.0            # polar m/px
     blend_deg: float = 1.0            # width of the blend-in ramp at the coverage edge
     polar_flip: tuple = (1, 1)        # empirically verified orientation (sx, sy)
+    despike_m: float = 0.0            # >0: replace isolated outliers (> this many m from the 3x3 median)
     _levels: list = field(default_factory=list, repr=False)
 
     # ---------------------------------------------------------------- loading
@@ -97,6 +98,18 @@ class Source:
     def level0(self) -> np.ndarray:
         return np.memmap(self.path, dtype=self.dtype, mode="r", shape=(self.height, self.width))
 
+    def read_metres(self, r0: int, r1: int, c0: int, c1: int) -> np.ndarray:
+        """Level-0 window [r0:r1, c0:c1] in metres, despiked if configured. The despike
+        filter sees a 1-pixel margin, so results do not depend on the window origin
+        (adjacent tiles get identical values on shared samples)."""
+        a = self.level0()
+        if self.despike_m <= 0:
+            return self._to_metres(np.asarray(a[r0:r1, c0:c1]))
+        R0, R1 = max(0, r0 - 1), min(self.height, r1 + 1)
+        C0, C1 = max(0, c0 - 1), min(self.width, c1 + 1)
+        v = despike(self._to_metres(np.asarray(a[R0:R1, C0:C1])), self.despike_m)
+        return v[r0 - R0: r0 - R0 + (r1 - r0), c0 - C0: c0 - C0 + (c1 - c0)]
+
     def build_overviews(self, cache: Path, min_size: int = 64) -> None:
         """Write float32 overview k (k >= 1) = 2x2 mean of k-1 (NaN aware) to cache."""
         cache.mkdir(parents=True, exist_ok=True)
@@ -114,8 +127,10 @@ class Source:
                 out = np.memmap(tmp, dtype="<f4", mode="w+", shape=(h2, w2))
                 rows = max(2, (64 << 20) // max(1, w * 4) // 2 * 2)
                 for r in range(0, h2 * 2, rows):
-                    blk = np.asarray(prev[r:min(r + rows, h2 * 2), : w2 * 2])
-                    blk = self._to_metres(blk) if k == 1 else blk
+                    if k == 1:
+                        blk = self.read_metres(r, min(r + rows, h2 * 2), 0, w2 * 2)
+                    else:
+                        blk = np.asarray(prev[r:min(r + rows, h2 * 2), : w2 * 2])
                     blk = blk.reshape(blk.shape[0] // 2, 2, w2, 2)
                     with np.errstate(invalid="ignore"):
                         out[r // 2: r // 2 + blk.shape[0]] = np.nanmean(blk, axis=(1, 3))
@@ -181,16 +196,32 @@ class Source:
             d = lat - self.lat_min
         return np.clip(d / self.blend_deg, 0.0, 1.0)
 
-    def pick_level(self, cell_m: float) -> int:
-        """Finest overview whose pixel size is >= ~cell (no aliasing)."""
-        k = 0
-        while k + 1 < len(self._levels) and self.res_m * (2 ** (k + 1)) <= cell_m * 1.0:
-            k += 1
-        return k
+    def sample(self, lat: np.ndarray, lon: np.ndarray, cell_m) -> np.ndarray:
+        """Trilinear sample: bilinear within the two overview levels bracketing the
+        per-sample footprint `cell_m` (scalar or array), blended by the fractional level.
+        NaN where unavailable."""
+        nlev = len(self._levels)
+        kf = np.log2(np.maximum(np.asarray(cell_m, dtype=np.float64), 1e-9) / self.res_m)
+        kf = np.clip(np.broadcast_to(kf, lat.shape), 0.0, nlev - 1)
+        k0 = np.floor(kf).astype(np.int64)
+        t = (kf - k0).astype(np.float32)
+        out = np.full(lat.shape, np.nan, np.float32)
+        lo_all = {}
+        for k in range(int(k0.min()), min(nlev - 1, int(k0.max()) + 1) + 1):
+            lo_all[k] = self._sample_level(k, lat, lon)
+        for k in np.unique(k0):
+            m = k0 == k
+            a = lo_all[int(k)][m]
+            if k + 1 < nlev:
+                b = lo_all[int(k) + 1][m]
+                tt = t[m]
+                out[m] = a * (1 - tt) + b * tt
+            else:
+                out[m] = a
+        return out
 
-    def sample(self, lat: np.ndarray, lon: np.ndarray, cell_m: float) -> np.ndarray:
-        """Bilinear sample at the appropriate overview. NaN where unavailable."""
-        k = self.pick_level(cell_m)
+    def _sample_level(self, k: int, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """Bilinear sample of overview level k. NaN where unavailable."""
         arr, raw = self._levels[k]
         col, row = self.pixel_coords(lat, lon)
         f = 2.0 ** k
@@ -227,7 +258,11 @@ class Source:
                 ci1 = np.clip(ci1, 0, block.shape[1] - 1)
         else:
             cmin, cmax = int(c0[valid].min()), int(c0[valid].max()) + 1
-            block = np.asarray(arr[rmin:rmax + 1, cmin:cmax + 1])
+            if raw:
+                block = self.read_metres(rmin, rmax + 1, cmin, cmax + 1)
+                raw = False
+            else:
+                block = np.asarray(arr[rmin:rmax + 1, cmin:cmax + 1])
             ci0 = np.clip(c0, cmin, cmax - 1) - cmin
             ci1 = ci0 + 1
         if raw:
@@ -240,6 +275,18 @@ class Source:
         out = (v00 * (1 - fc) + v01 * fc) * (1 - fr) + (v10 * (1 - fc) + v11 * fc) * fr
         out[~valid] = np.nan
         return out.astype(np.float32)
+
+
+def despike(v: np.ndarray, thr: float) -> np.ndarray:
+    """Replace isolated samples deviating > thr metres from their 3x3 median (LOLA
+    gridding outliers) by that median. Edges use the available neighbours only."""
+    from scipy.ndimage import median_filter
+    med = median_filter(v, size=3, mode="nearest")
+    bad = np.abs(v - med) > thr
+    if bad.any():
+        v = v.copy()
+        v[bad] = med[bad]
+    return v
 
 
 def load_sources(cfg: dict, raw: Path) -> list[Source]:
@@ -256,6 +303,7 @@ def load_sources(cfg: dict, raw: Path) -> list[Source]:
         src = Source.from_label(s["name"], lbl, img, blend_deg=s.get("blend_deg", 1.0))
         if "polar_flip" in s:
             src.polar_flip = tuple(s["polar_flip"])
+        src.despike_m = float(s.get("despike_m", 0.0))
         if "max_level" in s:
             src.max_level = s["max_level"]  # type: ignore[attr-defined]
         out.append(src)
