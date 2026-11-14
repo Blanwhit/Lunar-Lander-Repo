@@ -23,10 +23,11 @@ import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { GlobeControls } from './controls';
 import { Compass } from './compass';
 import { Ephemeris } from './ephemeris';
-import { R_MOON, H_MAX_GLOBAL, latLonToDir } from './geom';
+import { R_MOON, H_MAX_GLOBAL, H_MIN_GLOBAL, latLonToDir } from './geom';
 import { Hud } from './hud';
 import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
+import { SitePopup, createHint } from './sitePopup';
 import { gmst } from './time';
 import { skyFS, skyVS } from './terrain/shaders';
 import { TileTree, type FrameInfo, type LightParams } from './terrain/TileTree';
@@ -111,10 +112,110 @@ async function main() {
   };
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
 
+  // ---- right-click site inspector: pan the spot to the centre, popup with its score
+  createHint(document.body);
+  const popup = new SitePopup(document.body);
+  let site: { pos: Vector3; lat: number; lon: number } | null = null;
+  let siteToken = 0;
+  let siteTimer = 0;
+  popup.onClose = () => {
+    site = null;
+    siteToken++;
+    needsRender = true;
+  };
+  const scoreSite = async () => {
+    if (!site) return;
+    const token = ++siteToken;
+    popup.setLoading();
+    try {
+      const api = await (window as any).__moon.siteApi();
+      const r = await api.query({ lat: site.lat, lon: site.lon, time: simMs });
+      if (token === siteToken) popup.setScore(r.feasibility.score);
+    } catch (e) {
+      console.warn('site query', e);
+      if (token === siteToken) popup.setScore(null);
+    }
+    needsRender = true;
+  };
+  // a right *click* (press + release without dragging) inspects; a right drag still rotates
+  let rDown: { x: number; y: number; t: number } | null = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    rDown = e.button === 2 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (e.button !== 2 || !rDown) return;
+    const moved = Math.hypot(e.clientX - rDown.x, e.clientY - rDown.y);
+    const quick = performance.now() - rDown.t < 700;
+    rDown = null;
+    if (moved > 5 || !quick) return;
+    const hit = pickSurface(e.clientX, e.clientY);
+    if (!hit) return;
+    const dir = hit.clone().normalize();
+    site = {
+      pos: hit,
+      lat: Math.asin(Math.max(-1, Math.min(1, dir.z))) / DEG,
+      lon: Math.atan2(dir.y, dir.x) / DEG,
+    };
+    controls.flyTo(dir);
+    popup.show(site.lat, site.lon);
+    void scoreSite();
+    needsRender = true;
+  });
+
+  /** body-frame surface point under a CSS-pixel position (ray-marched against loaded terrain) */
+  function pickSurface(px: number, py: number): Vector3 | null {
+    const st = controls.state();
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const th = Math.tan(FOV_Y / 2);
+    const vd = new Vector3(((2 * px) / w - 1) * th * (w / h), (1 - (2 * py) / h) * th, -1);
+    const d = vd.applyMatrix3(st.viewRot.clone().transpose()).normalize();
+    const o = new Vector3(...st.camPos);
+    const b = o.dot(d), oo = o.lengthSq();
+    const rOut = R_MOON + H_MAX_GLOBAL, rIn = R_MOON + H_MIN_GLOBAL;
+    const discOut = b * b - (oo - rOut * rOut);
+    if (discOut < 0) return null;
+    const t0 = Math.max(0, -b - Math.sqrt(discOut));
+    let t1 = -b + Math.sqrt(discOut);
+    const discIn = b * b - (oo - rIn * rIn);
+    if (discIn >= 0) t1 = Math.min(t1, -b - Math.sqrt(discIn));
+    if (t1 <= t0) return null;
+    const p = new Vector3();
+    const f = (t: number) => {
+      p.copy(o).addScaledVector(d, t);
+      const r = p.length();
+      return r - (R_MOON + (tree.heightAt([p.x / r, p.y / r, p.z / r]) ?? 0));
+    };
+    // march with steps growing with range (fine near the camera), then bisect the crossing
+    let ta = t0, fa = f(ta);
+    if (fa < 0) return p.copy(o).addScaledVector(d, ta).clone();
+    while (ta < t1) {
+      const tb = Math.min(t1, ta + Math.max(2, (ta - t0 + 50) * 0.004));
+      const fb = f(tb);
+      if (fb <= 0) {
+        let lo = ta, hi = tb;
+        for (let i = 0; i < 30; i++) {
+          const m = (lo + hi) / 2;
+          if (f(m) > 0) lo = m;
+          else hi = m;
+        }
+        return o.clone().addScaledVector(d, hi);
+      }
+      ta = tb;
+    }
+    // reached the inner bound without a crossing (terrain not loaded): use the sphere
+    return discIn >= 0 ? o.clone().addScaledVector(d, t1) : null;
+  }
+
   async function setTime(ms: number) {
     simMs = ms;
     hud.setTime(ms);
     overlayTime(ms);
+    if (site) {
+      // the score depends on the time: recompute once the user stops stepping
+      clearTimeout(siteTimer);
+      popup.setLoading();
+      siteTimer = window.setTimeout(() => void scoreSite(), 300);
+    }
     const token = ++timeToken;
     const st = await ephem.at(ms);
     if (token !== timeToken) return; // a newer request superseded this one
@@ -224,7 +325,7 @@ async function main() {
   let last = performance.now();
   const perf = { frames: 0, renders: 0, fps: 0, lastFpsT: last, frameMs: 0 };
   (window as any).__moon = {
-    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, hud, ephem, setTime, overlay,
+    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, hud, ephem, setTime, overlay, popup,
     get simMs() { return simMs; },
   };
 
@@ -293,6 +394,17 @@ async function main() {
     for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
     overlay?.endFrame();
     renderer.render(scene, dummyCam);
+    // keep the site popup attached to its surface point
+    if (site) {
+      const v = site.pos.clone().sub(new Vector3(...st.camPos)).applyMatrix3(st.viewRot);
+      const facing = site.pos.clone().normalize().dot(new Vector3(...st.camPos).sub(site.pos)) > 0;
+      if (v.z < 0 && facing) {
+        const cw = canvas.clientWidth, ch = canvas.clientHeight;
+        const x = ((v.x / -v.z / (Math.tan(FOV_Y / 2) * aspect)) + 1) * 0.5 * cw;
+        const y = (1 - v.y / -v.z / Math.tan(FOV_Y / 2)) * 0.5 * ch;
+        popup.place(x >= 0 && x <= cw && y >= 0 && y <= ch ? { x, y } : null);
+      } else popup.place(null);
+    } else popup.place(null);
     perf.renders++;
     perf.frameMs = performance.now() - t0;
   }

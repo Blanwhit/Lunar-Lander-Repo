@@ -30,6 +30,7 @@ export class GlobeControls {
   private omega = new Vector3(); // angular velocity (rad/s) about axis
   private headingVel = 0;
   private northing = false; // animating back to north-up (compass click)
+  private flyGoal: Vector3 | null = null; // smooth pan of the target to this direction
   private dragging = false;
   private lastMove = 0;
   private pointers = new Map<number, { x: number; y: number }>();
@@ -57,6 +58,7 @@ export class GlobeControls {
     this.logDistGoal = Math.log(this.dist);
     if (tiltDeg !== undefined) this.tiltUser = this.tiltGoal = tiltDeg * DEG - this.autoTilt(this.dist);
     this.northing = false;
+    this.flyGoal = null;
     this.omega.set(0, 0, 0);
     this.headingVel = 0;
     this.changed = true;
@@ -98,8 +100,17 @@ export class GlobeControls {
     this.changed = true;
   }
 
+  /** smoothly pan so the body-frame direction `dir` ends up at the view centre
+   *  (keeps zoom, tilt and heading; any new pointer interaction cancels it) */
+  flyTo(dir: Vector3) {
+    this.flyGoal = dir.clone().normalize();
+    this.omega.set(0, 0, 0);
+    this.changed = true;
+  }
+
   // --------------------------------------------------------------- events
   private onDown = (e: PointerEvent) => {
+    this.flyGoal = null;
     this.el.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.dragging = true;
@@ -232,6 +243,17 @@ export class GlobeControls {
         moved = true;
       } else this.headingVel = 0;
     }
+    if (this.flyGoal) {
+      const ang = this.tgt.angleTo(this.flyGoal);
+      const axis = this.tgt.clone().cross(this.flyGoal);
+      if (ang * (R_MOON + this.pivotHeight) < 0.05 * this.groundMetresPerPixel() || axis.lengthSq() < 1e-24) {
+        if (axis.lengthSq() >= 1e-24) this.rotateTarget(axis.normalize(), ang);
+        this.flyGoal = null;
+      } else {
+        this.rotateTarget(axis.normalize(), ang * (1 - Math.exp(-dt * 7)));
+      }
+      moved = true;
+    }
     if (this.northing) {
       const h = this.heading();
       if (Math.abs(h) < 1e-4) {
@@ -283,7 +305,7 @@ export class GlobeControls {
   }
 
   isAnimating(): boolean {
-    return this.dragging || this.northing || this.omega.lengthSq() > 0 || this.headingVel !== 0 ||
+    return this.dragging || this.northing || this.flyGoal !== null || this.omega.lengthSq() > 0 || this.headingVel !== 0 ||
       Math.abs(this.logDistGoal - Math.log(this.dist)) > 1e-4;
   }
 }
