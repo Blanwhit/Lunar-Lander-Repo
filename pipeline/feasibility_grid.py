@@ -133,66 +133,91 @@ def build_store(max_global: int, polar_lat: float, max_polar: int) -> dict:
     return m
 
 
+G = 259  # stored samples per tile side (256 cells + border)
+
+
 class Terrain:
     def __init__(self, levels):
-        self.stack = np.load(CACHE / "feas_stack.npy", mmap_mode="r")
+        stack = np.load(CACHE / "feas_stack.npy", mmap_mode="r")
+        # flat view of the same mapping (shared page cache across workers, no memmap
+        # __getitem__ overhead on the four bilinear gathers)
+        self.flat = np.asarray(stack).reshape(-1)
         self.base = np.load(CACHE / "feas_base.npy")
         self.step = np.load(CACHE / "feas_step.npy")
-        self.tables = {L: np.load(CACHE / f"feas_table_L{L}.npy") for L in levels}
+        tables = {L: np.load(CACHE / f"feas_table_L{L}.npy") for L in levels}
         self.maxL = max(levels)
+        # deep[L][face, ty, tx] = index of the deepest stored tile with level <= L covering
+        # that level-L tile: one lookup replaces the search from L downwards
+        self.deep = []
+        self.level_of = np.zeros(len(self.base), np.int64)
+        for L in range(self.maxL + 1):
+            t = tables.get(L)
+            if t is not None:
+                self.level_of[t[t >= 0]] = L
+            if L == 0:
+                cur = t.copy()
+            else:
+                up = np.repeat(np.repeat(self.deep[L - 1], 2, axis=1), 2, axis=2)
+                cur = up if t is None else np.where(t >= 0, t, up)
+            self.deep.append(cur.astype(np.int64))
+
+    def _lookup(self, face, a, b, L: int):
+        n = 1 << L
+        # a + 1 >= 0, so the int cast is the floor; only the upper edge needs clamping
+        tx = np.minimum(((a + 1) / 2 * n).astype(np.int64), n - 1)
+        ty = np.minimum(((b + 1) / 2 * n).astype(np.int64), n - 1)
+        return self.deep[L][face, ty, tx]
 
     def sample(self, d: np.ndarray, level) -> tuple[np.ndarray, np.ndarray]:
         """heights at unit directions d (..,3) from the deepest stored tile <= level"""
         face, a, b = dirs_to_face(d)
-        lev = np.minimum(np.broadcast_to(np.asarray(level), face.shape), self.maxL).astype(np.int64)
-        idx = np.full(face.shape, -1, np.int64)
-        used = np.zeros(face.shape, np.int64)
-        todo = np.ones(face.shape, bool)
-        for L in range(self.maxL, -1, -1):
-            m = todo & (lev >= L)
-            if not m.any():
-                continue
-            if L not in self.tables:
-                continue
-            n = 1 << L
-            tx = np.clip(((a[m] + 1) / 2 * n).astype(np.int64), 0, n - 1)
-            ty = np.clip(((b[m] + 1) / 2 * n).astype(np.int64), 0, n - 1)
-            t = self.tables[L][face[m], ty, tx]
-            ok = t >= 0
-            sel = np.flatnonzero(m)[ok]
-            idx[sel] = t[ok]
-            used[sel] = L
-            todo[sel] = False
-            if not todo.any():
-                break
+        if np.ndim(level) == 0:
+            idx = self._lookup(face, a, b, min(int(level), self.maxL))
+        else:  # per-sample levels: few distinct values
+            lev = np.minimum(np.broadcast_to(np.asarray(level), face.shape), self.maxL).astype(np.int64)
+            idx = np.empty(face.shape, np.int64)
+            for L in np.unique(lev):
+                m = lev == L
+                idx[m] = self._lookup(face[m], a[m], b[m], int(L))
+        used = self.level_of[idx]
         span = 2.0 / (1 << used)
-        tx = np.floor((a + 1) / span)
-        ty = np.floor((b + 1) / span)
-        fu = ((a + 1) / span - tx) * 256 + 1
-        fv = ((b + 1) / span - ty) * 256 + 1
-        i = np.clip(np.floor(fu).astype(np.int64), 0, 257)
-        j = np.clip(np.floor(fv).astype(np.int64), 0, 257)
-        txf = np.clip(fu - i, 0, 1)
-        tyf = np.clip(fv - j, 0, 1)
-        st = self.stack
-        q00 = st[idx, j, i].astype(np.float64)
-        q10 = st[idx, j, i + 1]
-        q01 = st[idx, j + 1, i]
-        q11 = st[idx, j + 1, i + 1]
+        ga = (a + 1) / span
+        gb = (b + 1) / span
+        fu = (ga - np.floor(ga)) * 256 + 1  # in [1, 257): int cast = floor, only clamp the top
+        fv = (gb - np.floor(gb)) * 256 + 1
+        i = np.minimum(fu.astype(np.int64), 257)
+        j = np.minimum(fv.astype(np.int64), 257)
+        txf = np.minimum(fu - i, 1)
+        tyf = np.minimum(fv - j, 1)
+        k = (idx * G + j) * G + i
+        st = self.flat
+        q00 = st[k].astype(np.float64)
+        q10 = st[k + 1]
+        q01 = st[k + G]
+        q11 = st[k + G + 1]
         q = (q00 * (1 - txf) + q10 * txf) * (1 - tyf) + (q01 * (1 - txf) + q11 * txf) * tyf
         return self.base[idx] + q * self.step[idx], used
 
 
+# Every face axis in geom.FACES is a signed unit axis, so d . N, d . U and d . V are single
+# signed components (exactly what the dot products give):
+#   +X: U=+y V=+z   -X: U=-y V=+z   +Y: U=-x V=+z   -Y: U=+x V=+z   +Z: U=+y V=-x   -Z: U=+y V=+x
+assert np.array_equal(np.abs(FACES).sum(-1), np.ones((6, 3))), "face axes must be signed unit axes"
+
+
 def dirs_to_face(d: np.ndarray):
-    ad = np.abs(d)
-    ax = np.argmax(ad, axis=-1)
-    neg = np.take_along_axis(d, ax[..., None], -1)[..., 0] < 0
-    face = ax * 2 + neg  # 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z
-    N, U, V = FACES[face, 0], FACES[face, 1], FACES[face, 2]
-    dn = np.sum(d * N, -1)
-    s = np.sum(d * U, -1) / dn
-    t = np.sum(d * V, -1) / dn
-    return face, np.arctan(s) * 4 / np.pi, np.arctan(t) * 4 / np.pi
+    x, y, z = d[..., 0], d[..., 1], d[..., 2]
+    ax_, ay_, az_ = np.abs(x), np.abs(y), np.abs(z)
+    isx = (ax_ >= ay_) & (ax_ >= az_)  # same tie-breaking as argmax (first maximum)
+    isy = ~isx & (ay_ >= az_)
+    major = np.where(isx, x, np.where(isy, y, z))
+    neg = major < 0
+    face = np.where(isx, 0, np.where(isy, 2, 4)) + neg  # 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z
+    dn = np.abs(major)  # = d . N
+    sx = np.where(neg, -x, x)  # x * sign(major)
+    u = np.where(isx, np.where(neg, -y, y), np.where(isy, -sx, y))
+    v = np.where(isx | isy, z, -sx)
+    return face, np.arctan(u / dn) * 4 / np.pi, np.arctan(v / dn) * 4 / np.pi
 
 
 # ------------------------------------------------------------------ ephemeris
@@ -265,6 +290,33 @@ def along(up, east, north, az_deg, dist):
     return up * np.cos(th)[..., None] + hd * np.sin(th)[..., None]
 
 
+def march_horizon(T: Terrain, U, HD, r0, d):
+    """Terrain horizon of every ray (start U, horizontal direction HD, radius r0) as the best
+    elevation tangent. The elevation e = atan2(r1 cos th - r0, r1 sin th) has r1 sin th > 0,
+    so atan is monotonic in the tangent: compare tangents, take one arctan at the end."""
+    rtop = R + H_MAX
+    best = np.full(U.shape[0], -np.inf)
+    # all rays in lock-step; the still-active ones are kept as compacted arrays
+    ids, Ua, HDa, r0a, ba = np.arange(U.shape[0]), U, HD, r0, best.copy()
+    while d < 800e3 and ids.size:
+        th = d / R
+        c, s = np.cos(th), np.sin(th)
+        # stop rays that even the highest lunar terrain could no longer raise
+        keep = (rtop * c - r0a) / (rtop * s) >= ba
+        if not keep.all():
+            best[ids[~keep]] = ba[~keep]
+            ids, Ua, HDa, r0a, ba = ids[keep], Ua[keep], HDa[keep], r0a[keep], ba[keep]
+            if not ids.size:
+                break
+        Lr = int(max(0, np.ceil(np.log2(TEX0 / max(d * ANG, 1.0)))))
+        hh, _ = T.sample(Ua * c + HDa * s, Lr)
+        r1 = R + hh
+        np.maximum(ba, (r1 * c - r0a) / (r1 * s), out=ba)
+        d = d * 1.01 + 0.75 * float(texel(min(Lr, T.maxL)))
+    best[ids] = ba
+    return best
+
+
 def process_tile(key):
     L, f, x, y, child_mask = key
     out = TILES / "f" / str(L) / str(f) / str(y) / f"{x}.bin"
@@ -294,25 +346,8 @@ def process_tile(key):
     HD = (np.cos(np.radians(azs))[None, :, None] * north[:, None, :]
           + np.sin(np.radians(azs))[None, :, None] * east[:, None, :]).reshape(-1, 3)
     r0 = np.repeat(R + h0 + OBS_H, NAZ)
-    best = np.full(P * NAZ, -np.pi / 2)
-    active = np.arange(P * NAZ)
-    d = max(2.0, 0.5 * float(cell.min()))
-    rtop = R + H_MAX
-    while d < 800e3 and active.size:
-        th = d / R
-        c, s = np.cos(th), np.sin(th)
-        etop = np.arctan2(rtop * c - r0[active], rtop * s)
-        active = active[etop >= best[active]]
-        if not active.size:
-            break
-        Lr = int(max(0, np.ceil(np.log2(TEX0 / max(d * ANG, 1.0)))))
-        dirs = U[active] * c + HD[active] * s
-        hh, _ = T.sample(dirs, Lr)
-        r1 = R + hh
-        e = np.arctan2(r1 * c - r0[active], r1 * s)
-        best[active] = np.maximum(best[active], e)
-        d = d * 1.01 + 0.75 * float(texel(min(Lr, T.maxL)))
-    horizon = np.degrees(best).reshape(P, NAZ)
+    best_t = march_horizon(T, U, HD, r0, max(2.0, 0.5 * float(cell.min())))
+    horizon = np.degrees(np.arctan(best_t)).reshape(P, NAZ)
 
     # ---- reference-year statistics
     site = up * (R + h0 + OBS_H)[:, None] / 1000.0  # km

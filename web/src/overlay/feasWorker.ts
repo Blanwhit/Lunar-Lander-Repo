@@ -3,7 +3,7 @@
 // pipeline/feasibility_grid.py) and evaluates the time-dependent feasibility score of every
 // sample for a Sun/Earth timeline sent by the main thread.
 import { FACES, R_MOON } from '../geom';
-import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig } from '../api/feasibility';
+import { feasibilityScorer, type FeasibilityConfig, type FeasibilityInputs } from '../api/feasibility';
 import { albedo, EMISSIVITY, SIGMA } from '../api/thermal';
 
 export const STEP_H = 3; // timeline spacing (h)
@@ -25,17 +25,55 @@ interface Tile {
   S: number;
   naz: number;
   horizon: Int8Array; // 0.25 deg
+  hzMin: Float32Array; hzMax: Float32Array; // per sample: lowest / highest horizon bin (deg)
   n: number;
   up: Float64Array; east: Float64Array; north: Float64Array; normal: Float64Array; site: Float64Array;
   slope: Float32Array; prominence: Float32Array;
   annualSun: Float32Array; annualEarth: Float32Array; meanAbs: Float32Array;
 }
 
+/**
+ * Bounds that let the time scans skip steps whose outcome is certain. A body's elevation
+ * (seen from any site) changes by at most the angle it moves on the sky (elevation is
+ * 1-Lipschitz on the sphere), plus the parallax between the site and the Moon's centre at
+ * both ends. `fwd[s]` / `back[s]` are cumulative angles (deg) along the forward / backward
+ * timeline from "now"; skipped steps are only those where the margin's sign is proven.
+ */
+interface Bounds {
+  fwd: Float64Array; // s = 0..FWD_STEPS
+  back: Float64Array; // s = 0..BACK_STEPS (step s back = timeline index FWD_STEPS + s)
+  parallax: number; // deg, upper bound for one end
+  radiusMax: number; // deg, largest apparent radius over the timeline
+}
+
 const tiles = new Map<string, Tile>();
-let timeline: { token: number; sun: Float64Array; earth: Float64Array } | null = null;
-let config: FeasibilityConfig = DEFAULT_FEASIBILITY;
+let timeline: { token: number; sun: Float64Array; earth: Float64Array; sunB: Bounds; earthB: Bounds } | null = null;
+let score = feasibilityScorer(); // same result as feasibility(inp, config).score
+const inp = {} as FeasibilityInputs; // reused for every sample
 const DEG = Math.PI / 180;
 const R_SUN_KM = 695700, R_EARTH_KM = 6371, AU_KM = 149597870.7;
+const SITE_MAX_KM = (R_MOON + 11000) / 1000; // highest possible observer (km from the centre)
+const SAFE = 1e-4; // deg of slack on every proof (float rounding)
+
+/** angle (deg) between timeline vectors i and j: atan2 form, accurate for tiny angles */
+function angleDeg(v: Float64Array, i: number, j: number): number {
+  const ax = v[3 * i], ay = v[3 * i + 1], az = v[3 * i + 2], bx = v[3 * j], by = v[3 * j + 1], bz = v[3 * j + 2];
+  const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+  return Math.atan2(Math.hypot(cx, cy, cz), ax * bx + ay * by + az * bz) / DEG;
+}
+
+function bounds(v: Float64Array, radiusKm: number): Bounds {
+  const fwd = new Float64Array(FWD_STEPS + 1), back = new Float64Array(BACK_STEPS + 1);
+  for (let s = 1; s <= FWD_STEPS; s++) fwd[s] = fwd[s - 1] + angleDeg(v, s - 1, s);
+  for (let s = 1; s <= BACK_STEPS; s++) back[s] = back[s - 1] + angleDeg(v, s === 1 ? 0 : FWD_STEPS + s - 1, FWD_STEPS + s);
+  let dMin = Infinity;
+  for (let i = 0; i < v.length / 3; i++) dMin = Math.min(dMin, Math.hypot(v[3 * i], v[3 * i + 1], v[3 * i + 2]));
+  return {
+    fwd, back,
+    parallax: Math.asin(SITE_MAX_KM / dMin) / DEG,
+    radiusMax: Math.asin(Math.min(1, radiusKm / (dMin - SITE_MAX_KM))) / DEG,
+  };
+}
 
 async function load(key: string, url: string): Promise<number> {
   const res = await fetch(url);
@@ -57,8 +95,18 @@ async function load(key: string, url: string): Promise<number> {
 
   const F = FACES[face];
   const span = 2 / (1 << L);
+  const hzMin = new Float32Array(n), hzMax = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    let lo = 127, hi = -128;
+    for (let a = k * naz; a < (k + 1) * naz; a++) {
+      lo = Math.min(lo, horizon[a]);
+      hi = Math.max(hi, horizon[a]);
+    }
+    hzMin[k] = lo / 4;
+    hzMax[k] = hi / 4;
+  }
   const t: Tile = {
-    S, naz, horizon, n,
+    S, naz, horizon, hzMin, hzMax, n,
     up: new Float64Array(n * 3), east: new Float64Array(n * 3), north: new Float64Array(n * 3),
     normal: new Float64Array(n * 3), site: new Float64Array(n * 3),
     slope: new Float32Array(n), prominence: new Float32Array(n),
@@ -102,7 +150,8 @@ function discFraction(m: number, r: number): number {
   return 1 - (Math.acos(x) - x * Math.sqrt(1 - x * x)) / Math.PI;
 }
 
-/** geometry of a body (timeline vector `vi`) from sample k: margin above horizon, radius, dist, unit vector */
+/** geometry of a body (timeline vector `vi`) from sample k: margin above horizon, radius, dist,
+ *  unit vector, elevation (out[6]) */
 function geo(t: Tile, k: number, body: Float64Array, vi: number, radiusKm: number, out: Float64Array) {
   const k3 = 3 * k, b3 = 3 * vi;
   const vx = body[b3] - t.site[k3], vy = body[b3 + 1] - t.site[k3 + 1], vz = body[b3 + 2] - t.site[k3 + 2];
@@ -119,34 +168,52 @@ function geo(t: Tile, k: number, body: Float64Array, vi: number, radiusKm: numbe
   out[1] = Math.asin(radiusKm / d) / DEG;
   out[2] = d;
   out[3] = x; out[4] = y; out[5] = z;
+  out[6] = el;
 }
 
-/** hours until the margin first drops to <= 0, scanning the forward timeline */
-function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number, m0: number, g: Float64Array): number {
-  let prev = m0;
+/**
+ * Hours until the margin first drops to <= 0, scanning the forward timeline. Steps where the
+ * elevation bound keeps the body above the sample's highest horizon bin are skipped (their
+ * margin is provably > 0); the step before a crossing is evaluated for the interpolation, so
+ * the result is the same as evaluating every step.
+ */
+function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number, m0: number, el0: number,
+  B: Bounds, g: Float64Array): number {
+  let prev = m0, prevS = 0, a = 0, elA = el0;
+  const top = t.hzMax[k] + 2 * B.parallax + SAFE;
   for (let s = 1; s <= FWD_STEPS; s++) {
+    if (elA - (B.fwd[s] - B.fwd[a]) > top) continue;
     geo(t, k, body, s, radiusKm, g);
-    if (g[0] <= 0) return STEP_H * (s - 1 + prev / (prev - g[0]));
+    if (g[0] <= 0) {
+      const m = g[0];
+      if (prevS !== s - 1) {
+        geo(t, k, body, s - 1, radiusKm, g);
+        prev = g[0];
+      }
+      return STEP_H * (s - 1 + prev / (prev - m));
+    }
     prev = g[0];
+    prevS = a = s;
+    elA = g[6];
   }
   return STEP_H * FWD_STEPS;
 }
 
-function compute(t: Tile, sun: Float64Array, earth: Float64Array): Uint8Array {
+function compute(t: Tile, sun: Float64Array, earth: Float64Array, sunB: Bounds, earthB: Bounds): Uint8Array {
   const out = new Uint8Array(t.n);
-  const g = new Float64Array(6);
+  const g = new Float64Array(7);
   for (let k = 0; k < t.n; k++) {
     const k3 = 3 * k;
     // Sun now
     geo(t, k, sun, 0, R_SUN_KM, g);
-    const sm = g[0], vf = discFraction(g[0], g[1]);
+    const sm = g[0], vf = discFraction(g[0], g[1]), sunEl = g[6];
     const ci = g[3] * t.normal[k3] + g[4] * t.normal[k3 + 1] + g[5] * t.normal[k3 + 2];
     const flux = 1361 * (AU_KM / g[2]) ** 2;
-    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, g) : 0;
+    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, sunEl, sunB, g) : 0;
     // Earth now
     geo(t, k, earth, 0, R_EARTH_KM, g);
     const em = g[0], evf = discFraction(g[0], g[1]);
-    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, g) : 0;
+    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, g[6], earthB, g) : 0;
     // temperature proxy (calibrated against the 1-D model, see README)
     const tDeep = Math.max(20, 0.86 * Math.pow(t.meanAbs[k] / (EMISSIVITY * SIGMA), 0.25));
     const floor = Math.max(20, 0.4 * tDeep), tSet = Math.max(floor, 0.6 * tDeep);
@@ -155,27 +222,31 @@ function compute(t: Tile, sun: Float64Array, earth: Float64Array): Uint8Array {
       const absorbed = (1 - albedo(Math.acos(Math.min(1, ci)) / DEG)) * flux * ci * vf;
       temp = Math.max(Math.pow(absorbed / (EMISSIVITY * SIGMA), 0.25), floor);
     } else {
-      let hrs = Infinity;
+      // last time any part of the Sun was up and facing the slope; skip steps where even the
+      // highest possible Sun stays a full radius below the lowest horizon bin (margin <= -radius)
+      let hrs = Infinity, a = 0, elA = sunEl;
+      const low = t.hzMin[k] - 2 * sunB.parallax - sunB.radiusMax - SAFE;
       for (let s = 1; s <= BACK_STEPS; s++) {
+        if (elA + (sunB.back[s] - sunB.back[a]) < low) continue;
         geo(t, k, sun, FWD_STEPS + s, R_SUN_KM, g);
         const c2 = g[3] * t.normal[k3] + g[4] * t.normal[k3 + 1] + g[5] * t.normal[k3 + 2];
         if (g[0] > -g[1] && c2 > 0) { hrs = s * STEP_H; break; }
+        a = s;
+        elA = g[6];
       }
       temp = isFinite(hrs) ? floor + (tSet - floor) * Math.exp(-hrs / 60) : floor;
     }
-    const r = feasibility({
-      sunVisibleNow: vf,
-      sunHoursRemaining: sunH,
-      annualIllumination: t.annualSun[k],
-      earthVisibleNow: evf,
-      linkMarginDeg: Math.max(0, em),
-      earthHoursRemaining: earthH,
-      annualEarthVisibility: t.annualEarth[k],
-      slopeDeg: t.slope[k],
-      temperatureK: temp,
-      prominenceM: t.prominence[k],
-    }, config);
-    out[k] = Math.round(r.score * 2.55);
+    inp.sunVisibleNow = vf;
+    inp.sunHoursRemaining = sunH;
+    inp.annualIllumination = t.annualSun[k];
+    inp.earthVisibleNow = evf;
+    inp.linkMarginDeg = Math.max(0, em);
+    inp.earthHoursRemaining = earthH;
+    inp.annualEarthVisibility = t.annualEarth[k];
+    inp.slopeDeg = t.slope[k];
+    inp.temperatureK = temp;
+    inp.prominenceM = t.prominence[k];
+    out[k] = Math.round(score(inp) * 2.55);
   }
   return out;
 }
@@ -192,15 +263,15 @@ self.onmessage = async (ev: MessageEvent<FeasMsg>) => {
       post({ type: 'loaded', key: m.key, ok: false, childMask: 0, error: String(e) });
     }
   } else if (m.type === 'timeline') {
-    timeline = { token: m.token, sun: m.sun, earth: m.earth };
+    timeline = { token: m.token, sun: m.sun, earth: m.earth, sunB: bounds(m.sun, R_SUN_KM), earthB: bounds(m.earth, R_EARTH_KM) };
   } else if (m.type === 'config') {
-    config = m.config;
+    score = feasibilityScorer(m.config);
   } else if (m.type === 'drop') {
     tiles.delete(m.key);
   } else if (m.type === 'compute') {
     const t = tiles.get(m.key);
     if (!t || !timeline || timeline.token !== m.token) return post({ type: 'scores', key: m.key, token: -1, scores: new Uint8Array(0) });
-    const scores = compute(t, timeline.sun, timeline.earth);
+    const scores = compute(t, timeline.sun, timeline.earth, timeline.sunB, timeline.earthB);
     post({ type: 'scores', key: m.key, token: m.token, scores }, [scores.buffer]);
   }
 };

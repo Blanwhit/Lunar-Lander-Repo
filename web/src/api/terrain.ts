@@ -1,9 +1,10 @@
 // Headless terrain sampler over the MLH1 height-tile pyramid (no WebGL needed).
 //
 // Lookups are synchronous against already-loaded tiles. A lookup returns the deepest
-// loaded tile at or above the requested level and records which tile would be needed
-// next, so callers can run a computation, fetch the missing tiles in one batch, and
-// repeat until nothing is missing (see TileTerrain.until()).
+// loaded tile at or above the requested level and records what it was missing, so callers
+// can run a computation, fetch the missing tiles in one batch, and repeat until nothing is
+// missing (see TileTerrain.until()). A miss records the whole chain down to the requested
+// level, so one fetch round loads every level a lookup needs (not one level per round).
 import { GRID, TILE_N, dirToFace, type Vec3 } from '../geom';
 import { decodeHeightTile, type DecodedHeightTile } from '../terrain/heightCodec';
 
@@ -19,10 +20,24 @@ export interface Sample {
 
 const key = (L: number, f: number, x: number, y: number) => ((L * 6 + f) * 2048 + y) * 2048 + x;
 
+/** a missed lookup: load the tiles under (a, b) on `face` from level `from` down to `to` */
+interface Want {
+  face: number;
+  a: number;
+  b: number;
+  from: number;
+  to: number;
+}
+
+/** tile coordinate of face position a (or b) in [-1, 1] at level L */
+const tileAt = (a: number, L: number) => Math.min((1 << L) - 1, Math.max(0, Math.floor(((a + 1) / 2) * (1 << L))));
+
 export class TileTerrain {
   private roots: (TerrainTile | undefined)[] = new Array(6);
   private pending = new Map<number, Promise<void>>();
-  private wanted = new Map<number, [number, number, number, number]>();
+  private wanted = new Map<number, Want>();
+  /** how far ahead a miss loads (default: the pyramid's L11); a chain still stops at leaves */
+  maxLevel = 11;
   tilesLoaded = 0;
   bytesLoaded = 0;
 
@@ -57,25 +72,39 @@ export class TileTerrain {
     return t;
   }
 
-  /** fetch every tile requested by sync lookups since the last call */
-  async fetchWanted(concurrency = 12): Promise<number> {
+  private ensure(L: number, f: number, x: number, y: number): Promise<void> {
+    const k = key(L, f, x, y);
+    let p = this.pending.get(k);
+    if (!p) {
+      p = this.loadTile(L, f, x, y);
+      this.pending.set(k, p);
+    }
+    return p;
+  }
+
+  /** load the chain of tiles a missed lookup needs, parent before child, stopping at leaves */
+  private async loadChain(w: Want): Promise<number> {
+    let n = 0;
+    for (let L = w.from; L <= w.to; L++) {
+      const x = tileAt(w.a, L), y = tileAt(w.b, L);
+      await this.ensure(L, w.face, x, y);
+      n++;
+      const t = this.find(L, w.face, x, y);
+      if (!t || !t.childMask) break; // finest tile here: no deeper level exists
+    }
+    return n;
+  }
+
+  /** fetch every tile chain requested by sync lookups since the last call */
+  async fetchWanted(concurrency = 16): Promise<number> {
     const list = [...this.wanted.values()];
     this.wanted.clear();
-    let i = 0;
+    let i = 0, n = 0;
     const worker = async () => {
-      while (i < list.length) {
-        const [L, f, x, y] = list[i++];
-        const k = key(L, f, x, y);
-        let p = this.pending.get(k);
-        if (!p) {
-          p = this.loadTile(L, f, x, y);
-          this.pending.set(k, p);
-        }
-        await p;
-      }
+      while (i < list.length) n += await this.loadChain(list[i++]);
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, list.length) }, worker));
-    return list.length;
+    return n;
   }
 
   /** run `fn` repeatedly, loading the tiles it asked for, until it needs nothing new */
@@ -97,7 +126,7 @@ export class TileTerrain {
     const { face, a, b } = dirToFace(dir);
     const root = this.roots[face];
     if (!root) {
-      this.want(0, face, 0, 0);
+      this.want(face, a, b, 0, maxLevel);
       return { h: NaN, level: -1 };
     }
     let t: TerrainTile = root;
@@ -107,7 +136,7 @@ export class TileTerrain {
       const cy = Math.min(1, Math.max(0, Math.floor(((b + 1) / 2) * n2) - t.y * 2));
       const c: TerrainTile | null | undefined = t.children[(cy << 1) | cx];
       if (c === undefined) {
-        this.want(t.level + 1, face, t.x * 2 + cx, t.y * 2 + cy);
+        this.want(face, a, b, t.level + 1, maxLevel);
         break;
       }
       if (c === null) break;
@@ -116,9 +145,11 @@ export class TileTerrain {
     return { h: bilinear(t, a, b), level: t.level };
   }
 
-  private want(L: number, f: number, x: number, y: number) {
-    const k = key(L, f, x, y);
-    if (!this.pending.has(k)) this.wanted.set(k, [L, f, x, y]);
+  private want(face: number, a: number, b: number, from: number, maxLevel: number) {
+    const to = Math.max(from, Math.min(maxLevel, this.maxLevel));
+    // one entry per tile at the target level: lookups that share it share the chain
+    const k = key(to, face, tileAt(a, to), tileAt(b, to));
+    if (!this.wanted.has(k)) this.wanted.set(k, { face, a, b, from, to });
   }
 }
 

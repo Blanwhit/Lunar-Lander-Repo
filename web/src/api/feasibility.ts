@@ -135,6 +135,43 @@ export function powerMean(scores: number[], weights: number[], p: number): numbe
   return Math.pow(s, 1 / p);
 }
 
+/**
+ * The final score only, for evaluating many samples (the overlay worker): the config is
+ * flattened once and each call does the same arithmetic in the same order as feasibility(),
+ * without building the breakdown objects. feasibilityScorer(cfg)(inp) === feasibility(inp, cfg).score.
+ */
+export function feasibilityScorer(cfg: FeasibilityConfig = DEFAULT_FEASIBILITY): (inp: FeasibilityInputs) => number {
+  const cats: Category[] = ['power', 'comms', 'landing'];
+  const groups = cats.map((cat) => Object.entries(cfg.factors[cat] as Record<string, SubFactor>));
+  const keys = groups.map((g) => g.map(([k]) => k as FactorKey));
+  const facs = groups.map((g) => g.map(([, f]) => f));
+  const weights = facs.map((fs) => fs.map((f) => f.weight));
+  const catWeights = cats.map((c) => cfg.categoryWeights[c]);
+  const gates = cats.map((c) => cfg.gates[c]);
+  const sub = facs.map((fs) => new Array<number>(fs.length));
+  const catScores = new Array<number>(cats.length);
+  return (inp) => {
+    let knocked = false;
+    for (let c = 0; c < cats.length; c++) {
+      const fs = facs[c], ks = keys[c], s = sub[c];
+      for (let i = 0; i < fs.length; i++) {
+        const x = inp[ks[i]], f = fs[i];
+        s[i] = utility(f.curve, x);
+        if ((f.knockoutAbove !== undefined && x > f.knockoutAbove) || (f.knockoutBelow !== undefined && x < f.knockoutBelow))
+          knocked = true;
+      }
+      catScores[c] = powerMean(s, weights[c], cfg.p);
+    }
+    const combined = powerMean(catScores, catWeights, cfg.p);
+    let G = knocked ? 0 : 1;
+    for (let c = 0; c < cats.length; c++) {
+      const g = gates[c];
+      if (g && catScores[c] < g.tau) G *= Math.pow(catScores[c] / g.tau, g.k);
+    }
+    return Math.min(100, Math.max(1, G * combined));
+  };
+}
+
 export function feasibility(inp: FeasibilityInputs, cfg: FeasibilityConfig = DEFAULT_FEASIBILITY): FeasibilityResult {
   const subScores = {} as Record<FactorKey, number>;
   const knockouts: FactorKey[] = [];

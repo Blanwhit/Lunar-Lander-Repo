@@ -72,7 +72,7 @@ instead of `.venv/Scripts/python` (the Makefile picks the right one).
 | 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star layers, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
 | 4 | `make basisu` | fetches Basis Universal v1_50_0_2 from GitHub and compiles it with g++ | `tools/basisu(.exe)` | a few min |
 | 5 | `make tiles` | overviews → heights → colour → stars → meta → stats → ephem → earth (see below) | `web/public/tiles/` (3.2 GB), `web/public/ephem/`, `web/public/sky/earth.jpg` | ~50 min |
-| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | 2–3 h |
+| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | ~1–1.5 h |
 | 7 | `make build` | type-check + `vite build`; copies `web/public` including the tiles | `web/dist/` (~3.2 GB static site) | ~1 min |
 | 8 | `make serve` | serves `web/dist` | http://localhost:4173 | |
 | | `make pack` | optional: losslessly packs `data/raw` (10.9 → 5.1 GB, SHA-256 verified); `make unpack` restores it bit-exact | `data/raw_packed/` | |
@@ -142,7 +142,7 @@ does something when the `feasibility` block is present.
 
 * **Feasibility comes last.** It reads the finished height tiles and the 2026 ephemeris, then adds
   its entry to `meta.json`. Re-running `make meta` (or `make tiles`) later keeps that entry as long
-  as `tiles/f/` exists, so the 2–3 h step never has to be repeated just to restore it. Rerun
+  as `tiles/f/` exists, so the ~1–1.5 h step never has to be repeated just to restore it. Rerun
   `make feasibility` only when its inputs change: new height tiles (another `MAX_LEVEL`, other
   DEM sources or settings) or different feasibility options. Deleting `tiles/f/` and running
   `make meta` removes the entry.
@@ -220,9 +220,11 @@ at the point over the preceding three lunations (30-minute steps). Pass
   therefore lower bounds; measured values are ~25–70 K.
 - **Earth link:** this is line-of-sight geometry only. There is no RF link budget and no
   diffraction model.
-- **Range and speed:** times are limited to the ephemeris range (2000–2050). A query takes
-  ~0.2–1.5 s once tiles are cached; the first query in a new area also loads tiles (~40 KB
-  each).
+- **Range and speed:** times are limited to the ephemeris range (2000–2050). The first query at
+  a site takes ~0.3–1.5 s, mostly loading height tiles (~40 KB each) for its horizon; a missing
+  tile is loaded together with every level below it that the lookup needs, so the horizon is
+  ready after 2–3 fetch rounds. Further queries at the same site (another date or time) take
+  ~50–100 ms: the horizon and the reference-year statistics are cached per site.
 
 ## Feasibility score
 
@@ -272,8 +274,12 @@ statistics. They're stored as a separate quadtree of score tiles (`tiles/f/`, fo
 - levels 4–6 cover |latitude| ≥ 84° at about 670 m spacing.
 
 When the overlay is on, Web Workers evaluate the time-dependent part for the selected date and
-time, then call the same `feasibility()` function. That part is the Sun and Earth now, hours of
-sunlight and Earth contact remaining (3-hour steps), and temperature. The score is uploaded as a
+time, then score it with the same rules as `feasibility()` (`feasibilityScorer()`: identical
+scores, without building the breakdown). That part is the Sun and Earth now, hours of sunlight and
+Earth contact remaining (3-hour steps), and temperature. The time scans skip steps whose outcome
+is certain: a body's elevation changes by at most the angle it moves on the sky (plus parallax),
+so while it stays above a sample's highest horizon bin it can't have set (and while it stays a
+full disc below the lowest bin it can't have been up), and those steps aren't evaluated. The score is uploaded as a
 small texture per tile, and the terrain shader turns it into the colour ramp. Changing the date
 re-evaluates the visible tiles, on-screen ones first, and keeps the previous colours until new
 ones arrive.
@@ -293,8 +299,8 @@ ones arrive.
 |---|---|
 | score tiles | 830: levels 0–3 global (510), levels 4–6 polar (320); 3.40 M samples |
 | size | 146 MB in `web/public/tiles/f/` |
-| precompute | 2.6 h on a 32-thread laptop (24 workers), plus 5 min to build the decoded height store (`data/cache`, 4.1 GB, regenerable) |
-| overlay update after a date change | 3.5 s for the 42 tiles of the whole-Moon view (3 workers); 5–15 s when a new region is first opened (tile loading included). The previous colours stay until the new ones arrive |
+| precompute | ~1.2 h on a 32-thread laptop (24 workers), estimated from per-tile timings (2.2× faster per tile than the first build, which took 2.6 h; output byte-identical), plus 5 min to build the decoded height store (`data/cache`, 4.1 GB, regenerable) |
+| overlay update after a date change | scoring is 3× faster than the first version (~19 ms per 64 × 64 tile instead of ~56 ms, one thread); the whole-Moon view was fully coloured 0.8 s after switching the overlay on (3 workers, tiles loading included). A new region also waits for its score tiles to load. The previous colours stay until the new ones arrive |
 | overlay vs API, same point and time | equatorial and mid-latitude samples within 0.2 points. Polar samples are typically within 0–4 points, up to ~20 where the 5 m and 20 m terrain give different slopes |
 
 **Reading the map.**

@@ -19,11 +19,6 @@ export function albedo(iDeg: number): number {
   return ALBEDO0 + 0.06 * Math.pow(iDeg / 45, 3) + 0.25 * Math.pow(iDeg / 90, 8);
 }
 
-function heatCapacity(T: number): number {
-  const c = -3.6125 + 2.7431 * T + 2.3616e-3 * T * T - 1.234e-5 * T ** 3 + 8.9093e-9 * T ** 4;
-  return Math.max(c, 5);
-}
-
 export interface ThermalResult {
   surfaceK: number;
   /** temperature ~0.5 m deep (close to the long-term mean) */
@@ -58,30 +53,40 @@ export function simulateRegolith(absorbed: Float64Array, sampleS: number): Therm
   mean /= Math.max(1, absorbed.length);
   const t0 = Math.max(Math.pow((mean + Q_GEO) / (EMISSIVITY * SIGMA), 0.25) * 0.86, 20);
   const T = new Float64Array(N).fill(t0);
-  const Tn = new Float64Array(N);
+  // per-interface constants: mean conductivity and node spacing between nodes i and i + 1
+  const kHalf = new Float64Array(N - 1), dzi = new Float64Array(N - 1);
+  for (let i = 0; i < N - 1; i++) {
+    kHalf[i] = 0.5 * (kc[i] + kc[i + 1]);
+    dzi[i] = z[i + 1] - z[i];
+  }
+  const rw = new Float64Array(N); // rho * width: heat capacity per kelvin is rw * c(T)
+  for (let i = 0; i < N; i++) rw[i] = rho[i] * w[i];
+  const flux = new Float64Array(N - 1); // flux from node i + 1 into node i (W/m^2)
+  const ES = EMISSIVITY * SIGMA;
 
   const total = (absorbed.length - 1) * sampleS;
   const dt = 120; // s (stable for the top cell incl. radiative stiffness)
+  const last = absorbed.length - 1;
   for (let t = 0; t < total; t += dt) {
     const x = t / sampleS, k = Math.floor(x), f = x - k;
-    const F = absorbed[k] * (1 - f) + absorbed[Math.min(k + 1, absorbed.length - 1)] * f;
+    const F = absorbed[k] * (1 - f) + absorbed[Math.min(k + 1, last)] * f;
+    // each interface flux once (it enters one node and leaves the other)
+    for (let i = 0; i < N - 1; i++) {
+      const r = (0.5 * (T[i] + T[i + 1])) / 350;
+      flux[i] = (kHalf[i] * (1 + CHI * r * r * r) * (T[i + 1] - T[i])) / dzi[i];
+    }
+    // explicit update in place: every flux was taken from the old temperatures
     for (let i = 0; i < N; i++) {
       const Ti = T[i];
-      const cap = rho[i] * heatCapacity(Ti) * w[i];
-      let q = 0;
-      if (i < N - 1) {
-        const Tm = 0.5 * (Ti + T[i + 1]);
-        const km = 0.5 * (kc[i] + kc[i + 1]) * (1 + CHI * (Tm / 350) ** 3);
-        q += (km * (T[i + 1] - Ti)) / (z[i + 1] - z[i]);
-      } else q += Q_GEO;
-      if (i > 0) {
-        const Tm = 0.5 * (Ti + T[i - 1]);
-        const km = 0.5 * (kc[i] + kc[i - 1]) * (1 + CHI * (Tm / 350) ** 3);
-        q -= (km * (Ti - T[i - 1])) / (z[i] - z[i - 1]);
-      } else q += F - EMISSIVITY * SIGMA * Ti ** 4;
-      Tn[i] = Math.max(3, Ti + (dt * q) / cap);
+      let q: number;
+      if (i === 0) {
+        const T2 = Ti * Ti;
+        q = flux[0] + (F - ES * T2 * T2);
+      } else if (i === N - 1) q = Q_GEO - flux[i - 1];
+      else q = flux[i] - flux[i - 1];
+      const c = -3.6125 + Ti * (2.7431 + Ti * (2.3616e-3 + Ti * (-1.234e-5 + Ti * 8.9093e-9)));
+      T[i] = Math.max(3, Ti + (dt * q) / (rw[i] * Math.max(c, 5)));
     }
-    T.set(Tn);
   }
   let deep = T[N - 1];
   for (let i = 0; i < N; i++) if (z[i] >= 0.5) { deep = T[i]; break; }

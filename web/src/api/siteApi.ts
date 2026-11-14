@@ -252,6 +252,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const azStep = opts.azimuthStepDeg ?? 1;
   let ephemReady: Promise<void> | null = null;
   const horizonCache = new Map<string, Promise<HorizonProfile>>();
+  const refYearCache = new Map<string, { sun: number; earth: number; n: number }>();
 
   const initEphem = () => (ephemReady ??= ephem.init());
 
@@ -419,11 +420,14 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       const bodies = await bodiesFrom(t, siteKm);
       return { sun: geometry(bodies.sun, R_SUN_KM, f, hp), earth: geometry(bodies.earth, R_EARTH_KM, f, hp), raw: bodies };
     };
+    // one body only (the rise/set searches evaluate thousands of times)
+    const sunGeo = async (t: number) => geometry((await bodiesFrom(t, siteKm)).sun, R_SUN_KM, f, hp);
+    const earthGeo = async (t: number) => geometry((await bodiesFrom(t, siteKm)).earth, R_EARTH_KM, f, hp);
     const now = await geo(ms);
     const { sun, earth } = now;
 
     // Earth link + events (centre above terrain horizon + mask)
-    const earthMargin = async (t: number) => (await geo(t)).earth.marginDeg - mask;
+    const earthMargin = async (t: number) => (await earthGeo(t)).marginDeg - mask;
     const visibleNow = earth.marginDeg - mask > 0;
     const nextEarthEvent = await findCrossing(earthMargin, ms, days, 1);
     const earthFrac = discFractionAbove(earth.marginDeg - mask, earth.angularRadiusDeg);
@@ -441,7 +445,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     const earthSetT = nextSet;
 
     // power
-    const sunMargin = async (t: number) => (await geo(t)).sun.marginDeg;
+    const sunMargin = async (t: number) => (await sunGeo(t)).marginDeg;
     const sunUp = sun.marginDeg > 0;
     const nextSunEvent = await findCrossing(sunMargin, ms, days, 1);
     let sunRise = !sunUp ? nextSunEvent : null, sunSet = sunUp ? nextSunEvent : null;
@@ -462,7 +466,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     // illumination over the next year (6 h samples)
     let anyPart = 0, centre = 0, meanFrac = 0, total = 0;
     for (let t = ms; t < clampT(ms + 365 * 86400e3); t += 6 * 3600e3) {
-      const g = (await geo(t)).sun;
+      const g = await sunGeo(t);
       total++;
       meanFrac += g.visibleFraction;
       if (g.visibleFraction > 0) anyPart++;
@@ -474,14 +478,22 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       centreFraction: total ? centre / total : 0,
     };
 
-    // feasibility "annual" statistics over the fixed reference year (6 h samples)
-    let refSun = 0, refEarth = 0, refN = 0;
-    for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
-      const g = await geo(t);
-      refN++;
-      refSun += g.sun.visibleFraction;
-      if (g.earth.marginDeg - mask > 0) refEarth++;
+    // feasibility "annual" statistics over the fixed reference year (6 h samples); they don't
+    // depend on the query time, so they are cached per site like the horizon
+    const refKey = `${lat.toFixed(7)},${lon.toFixed(7)},${hObs},${mask}`;
+    let ref = refYearCache.get(refKey);
+    if (!ref) {
+      let s = 0, e = 0, n = 0;
+      for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
+        const g = await geo(t);
+        n++;
+        s += g.sun.visibleFraction;
+        if (g.earth.marginDeg - mask > 0) e++;
+      }
+      ref = { sun: s, earth: e, n };
+      refYearCache.set(refKey, ref);
     }
+    const { sun: refSun, earth: refEarth, n: refN } = ref;
 
     // absorbed-flux history on the local ground facet (30 min steps, ~3 lunations back)
     const HIST_STEP = 1800, HIST_DAYS = 88.6;
