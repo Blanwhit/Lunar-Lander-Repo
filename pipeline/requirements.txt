@@ -5,3 +5,4 @@ pyproj>=3.6
 opencv-python-headless>=4.10   # OpenEXR reading (OPENCV_IO_ENABLE_OPENEXR=1)
 pillow>=10
 requests>=2.31
+OpenEXR>=3.3       # EXR reading (colour map, star map)
