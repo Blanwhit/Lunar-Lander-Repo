@@ -101,11 +101,17 @@ async function main() {
   let needsRender = true;
   tree.onChange = () => (needsRender = true);
 
-  // progressive star cubemaps
+  // progressive star cubemaps: the small one immediately, larger ones only once the
+  // terrain base level is in and the tile queue is idle (keeps the initial load small)
   (async () => {
-    for (const f of meta.stars ?? []) {
+    const files = meta.stars ?? [];
+    for (let i = 0; i < files.length; i++) {
+      if (i > 0) {
+        while (!tree.roots.every((r) => r.colourState === 2) || tree.isBusy())
+          await new Promise((r) => setTimeout(r, 500));
+      }
       try {
-        const tex = (await ktx2.loadAsync(base + f)) as unknown as CubeTexture;
+        const tex = (await ktx2.loadAsync(base + files[i])) as unknown as CubeTexture;
         tex.magFilter = LinearFilter;
         tex.minFilter = tex.mipmaps && tex.mipmaps.length > 1 ? LinearMipmapLinearFilter : LinearFilter;
         tex.needsUpdate = true;
@@ -114,8 +120,6 @@ async function main() {
         sky.visible = true;
         old?.dispose();
         needsRender = true;
-        // let the terrain base level go first before fetching the big sky
-        await new Promise((r) => setTimeout(r, 1500));
       } catch (e) {
         console.warn('stars', e);
       }

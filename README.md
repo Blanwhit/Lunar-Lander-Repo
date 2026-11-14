@@ -63,7 +63,7 @@ Development server: `cd web && npm run dev`.
   * Children replace their parent only when all 4 are loaded.
 * **Geomorphing (CDLOD)**: odd vertices slide onto the parent grid over [0.8·D_{L-1}, D_{L-1}]
   using per-vertex camera distance. **Skirts** hide residual T-junction cracks.
-* **One shared grid mesh** for all tiles. The vertex shader displaces it from a R16UI height
+* **One shared grid mesh** for all tiles (65×65 vertices + skirts by default; `?mesh=` to change). The vertex shader displaces it from a R16UI height
   texture. Normals are baked per tile in a Web Worker into an RG16F tangent-space map (with mips).
 * **Precision**: positions are never formed in absolute coordinates on the GPU. The CPU (float64)
   supplies the tile origin relative to the camera, and the shader adds the small offset
@@ -83,7 +83,93 @@ Development server: `cd web && npm run dev`.
 
 ## Tile pyramid and numbers
 
-MEASUREMENTS_PLACEHOLDER
+### Tile pyramid (output of `make stats`)
+
+| level | ~m/px | height tiles | height size | colour tiles | colour size | where |
+|---:|---:|---:|---:|---:|---:|---|
+| 0 | 10 661 | 6 | 262 KB | 6 | 147 KB | global |
+| 1 | 5 330 | 24 | 1.1 MB | 24 | 569 KB | global |
+| 2 | 2 665 | 96 | 4.3 MB | 96 | 6.0 MB | global |
+| 3 | 1 333 | 384 | 17.2 MB | 384 | 22.6 MB | global |
+| 4 | 666 | 1 536 | 67.8 MB | 1 536 | 85.3 MB | global |
+| 5 | 333 | 6 144 | 264.6 MB | 6 144 | 315.5 MB | global (colour stops here: ~400 m source) |
+| 6 | 167 | 12 896 | 522.1 MB | | | global (SLDEM2015 128 ppd / LOLA 200 m) |
+| 7 | 83 | 7 520 | 281.1 MB | | | ≥ 60° N/S (LOLA 120 m) |
+| 8 | 42 | 12 288 | 440.3 MB | | | ≥ 75° N/S (LOLA 60 m) |
+| 9 | 21 | 10 704 | 444.1 MB | | | ≤ 80° S (LOLA 20 m) |
+| 10 | 10 | 2 800 | 127.0 MB | | | ≤ 87.5° S |
+| 11 | **5.2** | 10 672 | 424.9 MB | | | ≤ 87.5° S (LOLA 5 m) |
+| **total** | | **65 070** | **2.5 GB** | **8 190** | **430 MB** | **3.0 GB** on disk |
+
+* **Maximum resolution reached**: 5.2 m/px (L11) inside 87.5°S, which includes Shackleton, de Gerlache,
+  Shoemaker and the Artemis candidate regions. It is 20.8 m to 80°S, 41.6 m at both caps beyond
+  75°, 83 m beyond 60°, and 167 m elsewhere. That last figure is limited by the 237 m SLDEM2015 grid
+  used here. With the 512 ppd SLDEM grid (45 GB) the same pipeline would reach about 42 m at L8.
+* Each tile has 257×257 vertices plus a border (259² samples). Heights average 37–46 KB per tile,
+  and colour tiles are UASTC from L2 (~51 KB) and ETC1S at L0–L1 (~24 KB).
+* Build time on a 32-thread laptop: overviews ~14 min (despiking the 5 m and 20 m grids takes most of
+  it), heights 15 min with 24 processes, colour ~17 min.
+
+### Performance (Chrome 156, measured)
+
+Measured on an RTX 4070 Laptop GPU (ANGLE/D3D11) with a 1920×1080 canvas at DPR 1 and
+MSAA on, using [web/bench/bench.js](web/bench/bench.js). Each frame is forced with `gl.finish()` while
+the camera turns, so the time includes CPU LOD selection and GPU work. The vsync-limited real
+frame rate is 60 fps in every case.
+
+| view | tiles | triangles | tex. memory | frame (avg / p95) | GPU time | ≈ fps (uncapped) |
+|---|---:|---:|---:|---:|---:|---:|
+| whole Moon | 56 | 0.49 M | 43 MB | 0.74 / 1.5 ms | 0.15 ms | 1 350 |
+| 200 km orbit | 23 | 0.20 M | 137 MB | 0.71 / 1.7 ms | 0.31 ms | 1 400 |
+| Shackleton, 25 km, tilted | 250 | 2.18 M | 357 MB | 3.2 / 5.2 ms | 1.1 ms | 310 |
+| Shackleton rim, 3 km (L11, 5 m) | 317 | 2.76 M | 365 MB | 4.0 / 6.2 ms | 0.9 ms | 250 |
+
+* Texture memory is the LRU cache. It is capped by `gpuBudgetBytes` (384 MB) and includes off-screen
+  tiles. My estimate for the working set of the 3 km view is ~155 MB: 317 drawn tiles × 488 KB
+  (R16UI heights + mipmapped RG16F normals) plus their ancestors and colour. Geometry is one shared
+  65×65 grid with skirts (~110 KB).
+* For a mid-range laptop (an Iris Xe class iGPU has roughly 1/10 of this GPU's throughput),
+  1–1.5 ms of GPU time leaves about 10 ms of headroom inside a 16.7 ms frame. To tune it, use
+  `pixelsPerTexel` (LOD threshold) in [main.ts](web/src/main.ts), `?mesh=32|64|128` (mesh density),
+  and `gpuBudgetBytes`. We have not measured it on such hardware. Run `moonBench()` from
+  [bench.js](web/bench/bench.js) in the console to get your own numbers.
+* Streaming: finished tiles are promoted to the GPU at most 2–8 per frame, within a 3 ms budget.
+  Before this throttle, frames during fast flights spiked to 87–132 ms p95. With it they stay at
+  5–6 ms.
+
+### Initial payload (production build, measured)
+
+Everything fetched until the first frame that has all six L0 terrain tiles, their colour and the
+star background:
+
+| item | size |
+|---|---:|
+| `index.html` + JS bundle (three.js + app, gzip) | 182 KB |
+| Basis transcoder wasm | 515 KB (248 KB gzip) |
+| L0 heights (6 tiles) | 262 KB |
+| L0 colour (6 tiles, ETC1S) | 147 KB |
+| 512² star cubemap | 293 KB |
+| **total** | **1.40 MB** (1.13 MB with gzipped wasm) |
+
+On localhost the first full frame appears 0.35 s after the app starts. Refinement requests are held
+back until the base level is complete. The 4.3 MB 2048² star cubemap is fetched only once the tile
+queue is idle.
+
+### Visual verification (automated captures)
+
+* **Shackleton**: the rim is sharp at L11 (5 m). The floor is in permanent shadow and the far wall
+  is lit by the grazing sun. Isolated LOLA gridding spikes were removed (see DATA_SOURCES.md). The
+  remaining faint radial striations follow LOLA ground tracks and are in the source DEM.
+* **Seams**: shared tile and face edges are bit-identical in the pipeline (max difference 0.0000 m,
+  tested). Grazing-light captures at a cube-face edge (30°N, 135°E), a cube corner (35.26°S, 45°E)
+  and the ±60° SLDEM/LOLA boundary show no visible seam. Colour tiles use corner-aligned texels
+  so that adjacent tiles also match.
+* **Popping**: during a continuous zoom from 25 to 6 km over Shackleton (200 frames, 142 LOD
+  switches), each switch was rendered twice from the same camera, once with the old tile set and
+  once with the new. The mean image change per switch was 0.011 grey levels. The worst switch
+  changed 0.47% of pixels by more than 16/255. Frame-to-frame change from the camera motion itself
+  is ~13 grey levels, so LOD changes are about 1000× below motion. At a 3× coarser LOD threshold,
+  geomorphing lowers the worst switch from 0.49% to 0.38% of pixels.
 
 ## Data credits
 

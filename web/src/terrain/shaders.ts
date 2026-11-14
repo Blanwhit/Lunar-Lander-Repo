@@ -107,6 +107,7 @@ in float vMorph;
 uniform sampler2D uNormal;   // RG16F 257x257 tangent-space normal (e1, e2)
 uniform sampler2D uColour;   // sRGB albedo (decoded to linear by the sampler)
 uniform vec3 uColourXf;      // (scale, offsetU, offsetV): tile uv -> colour tile uv
+uniform float uColourBias;   // 1 if this tile owns its colour texture (bias with morph), else 0
 uniform vec3 uU;
 uniform vec3 uLight;         // body-frame unit vector towards the light
 uniform float uSun;          // light intensity
@@ -132,7 +133,7 @@ void main() {
 
   // corner-aligned colour texels: tile uv 0..1 -> texel centres 0.5..255.5
   vec2 cuv = ((uColourXf.yz + vUv * uColourXf.x) * 255.0 + 0.5) / 256.0;
-  vec3 albedo = texture(uColour, cuv, vMorph).rgb;
+  vec3 albedo = texture(uColour, cuv, vMorph * uColourBias).rgb;
 
   vec3 V = normalize(-vRel);
   float mu0 = max(dot(n, uLight), 0.0);

@@ -119,7 +119,14 @@
    "2",
    "-uastc_rdo_l",
    "1.0"
-  ]
+  ],
+  "basis_low": [
+   "-q",
+   "255",
+   "-comp_level",
+   "3"
+  ],
+  "basis_low_max_level": 1
  },
  "stars": {
   "exr": "starmap_2020_8k.exr",

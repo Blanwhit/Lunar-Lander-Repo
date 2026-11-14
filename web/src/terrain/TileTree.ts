@@ -214,12 +214,15 @@ export class TileTree {
   private inflightColour = 0;
   private wantHeights: TileNode[] = [];
   private wantColour: TileNode[] = [];
+  private arrivals: HeightResult[] = [];
+  private colourArrivals: [TileNode, Texture][] = [];
   private fallbackColour = makeFallbackColour();
   private frustum = new Frustum();
   private tmpM = new Matrix4();
   private tmpV = new Vector3();
   private sphere = new Sphere();
   gpuBytes = 0;
+  private baseReady = false;
   bytesDownloaded = 0;
   drawn: TileNode[] = [];
   onChange: () => void = () => {};
@@ -235,7 +238,12 @@ export class TileTree {
     const nw = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
     for (let i = 0; i < nw; i++) {
       const w = new Worker(new URL('./heightWorker.ts', import.meta.url), { type: 'module' });
-      w.onmessage = (ev: MessageEvent<HeightResult>) => this.onHeight(ev.data, i);
+      w.onmessage = (ev: MessageEvent<HeightResult>) => {
+        this.workerBusy[i]--;
+        this.inflightHeights--; // free the request slot now; GPU promotion is throttled
+        this.arrivals.push(ev.data);
+        this.onChange();
+      };
       this.workers.push(w);
       this.workerBusy.push(0);
     }
@@ -276,6 +284,7 @@ export class TileTree {
   }
 
   update(fi: FrameInfo): TileNode[] {
+    this.drainArrivals();
     const P = fi.viewportHeight / (2 * Math.tan(fi.fovY / 2));
     this.tmpM.setFromMatrix3(fi.viewRot);
     this.tmpM.premultiply(fi.proj);
@@ -295,6 +304,8 @@ export class TileTree {
       this.pump();
       return this.drawn;
     }
+    // base level first: no refinement requests until every L0 height + colour is in
+    this.baseReady = this.roots.every((r) => r.colourState === READY || r.colourState === FAILED);
     for (const r of this.roots) this.visit(r, fi, P, camR);
     this.pump();
     this.evict(fi.frame);
@@ -341,7 +352,7 @@ export class TileTree {
     const d = this.distTo(n, fi.camPos);
     const D = this.splitDist(n.level, P);
     this.requestColour(n, fi, d, D);
-    const wantSplit = d < D && n.childMask !== 0 && n.level < this.opts.maxLevel;
+    const wantSplit = this.baseReady && d < D && n.childMask !== 0 && n.level < this.opts.maxLevel;
     if (wantSplit) {
       if (!n.children) {
         n.children = [];
@@ -373,6 +384,7 @@ export class TileTree {
 
   private requestColour(n: TileNode, _fi: FrameInfo, d: number, D: number) {
     if (n.level > this.opts.colourMaxLevel || n.colourState !== EMPTY) return;
+    if (n.level > 0 && !this.baseReady) return;
     n.priority = Math.max(n.priority, D / Math.max(d, 1));
     this.wantColour.push(n);
   }
@@ -414,13 +426,7 @@ export class TileTree {
           tex.minFilter = tex.mipmaps && tex.mipmaps.length > 1 ? LinearMipmapLinearFilter : LinearFilter;
           tex.anisotropy = 4;
           tex.needsUpdate = true;
-          if (n.colourState !== LOADING) {
-            tex.dispose();
-            return;
-          }
-          n.colourTex = tex;
-          n.colourState = READY;
-          this.gpuBytes += COLOUR_BYTES;
+          this.colourArrivals.push([n, tex]);
         })
         .catch(() => {
           n.colourState = FAILED;
@@ -432,11 +438,30 @@ export class TileTree {
     }
   }
 
-  private onHeight(r: HeightResult, worker: number) {
-    this.workerBusy[worker]--;
+  /** promote a few finished downloads per frame (bounded GPU upload work per frame) */
+  private drainArrivals() {
+    const t0 = performance.now();
+    let k = 0;
+    while (this.arrivals.length && (k < 2 || performance.now() - t0 < 3) && k < 8) {
+      this.onHeight(this.arrivals.shift()!);
+      k++;
+    }
+    k = 0;
+    while (this.colourArrivals.length && k < 4) {
+      const [n, tex] = this.colourArrivals.shift()!;
+      if (n.colourState === LOADING) {
+        n.colourTex = tex;
+        n.colourState = READY;
+        this.gpuBytes += COLOUR_BYTES;
+      } else tex.dispose();
+      k++;
+    }
+    if (this.arrivals.length || this.colourArrivals.length) this.onChange();
+  }
+
+  private onHeight(r: HeightResult) {
     const n = this.pending.get(r.id);
     this.pending.delete(r.id);
-    this.inflightHeights--;
     if (!n) return;
     if (!r.ok) {
       console.warn('height tile failed', n.key, r.error);
@@ -547,6 +572,7 @@ export class TileTree {
           uNormal: { value: n.normalTex },
           uColour: { value: this.fallbackColour },
           uColourXf: { value: new Vector3(1, 0, 0) },
+          uColourBias: { value: 0 },
           uLight: { value: new Vector3() },
           uSun: { value: 1 },
           uAmbient: { value: 0.02 },
@@ -573,6 +599,8 @@ export class TileTree {
     const c = this.colourFor(n);
     u.uColour.value = c.tex;
     (u.uColourXf.value as Vector3).set(c.scale, c.ou, c.ov);
+    // parent and children that share an ancestor's colour texture must sample it identically
+    u.uColourBias.value = c.scale === 1 ? 1 : 0;
     (u.uLight.value as Vector3).copy(light);
     u.uSun.value = lightParams.sun;
     u.uAmbient.value = lightParams.ambient;
@@ -588,6 +616,6 @@ export class TileTree {
   }
 
   isBusy(): boolean {
-    return this.inflightHeights > 0 || this.inflightColour > 0;
+    return this.inflightHeights > 0 || this.inflightColour > 0 || this.arrivals.length > 0 || this.colourArrivals.length > 0;
   }
 }

@@ -270,7 +270,10 @@ def cmd_colour(args) -> None:
             pngs = [Path(p) for p in pool.imap_unordered(_colour_one, keys, chunksize=8)]
             batches = [pngs[i:i + 48] for i in range(0, len(pngs), 48)]
             with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 4))) as ex:
-                list(ex.map(lambda b: _basisu(b, ktx_tmp, CFG["colour"]["basis"]), batches))
+                # L0-L1 (initial load, shown ~1:1): small ETC1S; deeper (magnified): UASTC
+                low = L <= CFG["colour"].get("basis_low_max_level", -1)
+                opts = CFG["colour"]["basis_low"] if low else CFG["colour"]["basis"]
+                list(ex.map(lambda b: _basisu(b, ktx_tmp, opts), batches))
             for p in pngs:
                 _, f, y, x = p.stem.split("_")
                 dst = OUT / "c" / str(L) / f / y / f"{x}.ktx2"
