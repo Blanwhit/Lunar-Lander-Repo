@@ -2,7 +2,8 @@ numpy>=1.26
 scipy>=1.13
 rasterio>=1.4      # bundles GDAL (used for label/CRS cross-checks)
 pyproj>=3.6
-opencv-python-headless>=4.10   # OpenEXR reading (OPENCV_IO_ENABLE_OPENEXR=1)
+opencv-python-headless>=4.10   # area resampling / remapping (colour pyramid, star cubemaps)
 pillow>=10
 requests>=2.31
 OpenEXR>=3.3       # EXR reading (colour map, star map)
+zstandard>=0.22   # lossless packing of the raw data (pipeline/pack_raw.py)
