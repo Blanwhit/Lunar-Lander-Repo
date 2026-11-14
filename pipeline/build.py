@@ -288,18 +288,39 @@ def cmd_colour(args) -> None:
 def cmd_stars(args) -> None:
     import cv2
     from PIL import Image
-    img = read_exr_rgb(RAW / CFG["stars"]["exr"]).astype(np.float32)
-    H, W = img.shape[:2]
-    lum = img.mean(axis=2)
-    p50, p99, p9999 = np.percentile(lum, [50, 99, 99.99])
-    print(f"star map {W}x{H}: p50 {p50:.4g} p99 {p99:.4g} p99.99 {p9999:.4g}")
-    # display transform: black point at the median sky (so the background is black and
-    # compresses well), mild gain so the Milky Way stays a faint glow; stars saturate.
-    bp = float(p50)
-    gain = CFG["stars"].get("gain", 1.2)
+    sc = CFG["stars"]
+    # Two separate SVS layers, composited in linear light at the Milky Way's resolution:
+    #  * stars only (Hipparcos-2 + Tycho-2) at 2x resolution, area-averaged down so faint stars
+    #    stay single crisp points; only the part of a star above `bloom_threshold` feeds a
+    #    small Gaussian bloom, so bright stars read as bright without blurring the faint ones.
+    #    The layer's background is exactly 0, so the sky between stars stays black.
+    #  * diffuse Milky Way (Gaia) with its black point at the median sky, partly desaturated
+    #    (the brown cast of the dust lanes reads as muddy on screen) and kept faint.
+    mw = read_exr_rgb(RAW / sc["milkyway_exr"])
+    H, W = mw.shape[:2]
+    st16 = read_exr_rgb(RAW / sc["stars_exr"])
+    stars = np.empty((H, W, 3), np.float32)
+    rows = st16.shape[0] // H  # integer factor; resample in bands to bound memory
+    band = 512
+    for r0 in range(0, H, band):
+        src = st16[r0 * rows:(r0 + band) * rows].astype(np.float32)
+        stars[r0:r0 + band] = cv2.resize(src, (W, src.shape[0] // rows), interpolation=cv2.INTER_AREA)
+    del st16
+    stars *= sc["star_gain"]
+    bloom = cv2.GaussianBlur(np.clip(stars - sc["bloom_threshold"], 0, None), (0, 0), sc["bloom_sigma_px"])
+    stars += bloom * sc["bloom_gain"]
+    del bloom
+    mw = mw.astype(np.float32)
+    bp = float(np.percentile(mw[::4, ::4].mean(axis=2), 50))
+    mw = np.clip(mw - bp, 0, None)
+    lum = mw.mean(axis=2, keepdims=True)
+    mw = (lum + (mw - lum) * sc["milkyway_saturation"]) * sc["milkyway_gain"]
+    img = stars + mw
+    del stars, mw, lum
+    print(f"star map {W}x{H}: milky way black point {bp:.4g}, p99.9 {np.percentile(img[::4, ::4], 99.9):.3g}")
 
     def tone(v):
-        v = np.clip((v - bp) * gain, 0, 1)
+        v = np.clip(v, 0, 1)
         return np.where(v <= 0.0031308, v * 12.92, 1.055 * np.power(v, 1 / 2.4) - 0.055)
 
     files = []
@@ -352,14 +373,49 @@ def cmd_stars(args) -> None:
 
 
 # -------------------------------------------------------------------- earth
-def cmd_earth(args) -> None:
-    """NASA Blue Marble (SVS 2915) -> 1024x512 JPEG for the sky's Earth impostor"""
+def cloud_opacity(with_clouds: Path, without: Path, w: int, h: int) -> np.ndarray:
+    """Cloud opacity (h, w) in 0..1 from a matched pair of equirectangular Earth renders.
+
+    with = base * (1 - a) + C * a  ->  a = (with - base) / (C - base), taking the minimum
+    over RGB so tinted differences (ocean shading, haze) don't read as cloud. The source
+    clouds thin out from about +-48 deg latitude, so that band is extended to ~70 deg by
+    mirroring the 26-48 deg band (offset in longitude so it doesn't look copied) and faded towards
+    the poles.
+    """
+    import cv2
     from PIL import Image
-    src = RAW / "bluemarble-2048.png"
+    base = np.asarray(Image.open(without).convert("RGB"), np.float32) / 255
+    bh, bw = base.shape[:2]
+    full = np.asarray(Image.open(with_clouds).convert("RGB").resize((bw, bh), Image.BOX), np.float32) / 255
+    a = np.clip(((full - base) / np.maximum(0.97 - base, 0.03)).min(axis=2), 0, 1)
+    a = cv2.morphologyEx(a, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))  # coastline misregistration
+    a = cv2.GaussianBlur(a, (0, 0), 0.8)
+    s = np.clip((a - 0.14) / (0.80 - 0.14), 0, 1)  # drop the haze floor, keep soft edges
+    a = s * s * (3 - 2 * s)
+    # extend towards the poles: mirror about 48 deg, shifted 97 deg in longitude
+    lat = 90 - (np.arange(bh) + 0.5) * 180 / bh
+    rows_m = np.clip(np.round((90 - np.sign(lat) * (96 - np.abs(lat))) / 180 * bh - 0.5).astype(int), 0, bh - 1)
+    mirrored = np.roll(a[rows_m], int(97 / 360 * bw), axis=1)
+    al = np.abs(lat)[:, None]
+    blend = np.clip((al - 44) / 6, 0, 1)
+    blend = blend * blend * (3 - 2 * blend)
+    fade = np.clip((76 - al) / 10, 0, 1)
+    a = (a * (1 - blend) + mirrored * blend * 0.85) * fade
+    return np.asarray(Image.fromarray((a * 255 + 0.5).astype(np.uint8)).resize((w, h), Image.BOX), np.float32) / 255
+
+
+def cmd_earth(args) -> None:
+    """NASA Blue Marble (SVS 2915) + baked-in clouds (SVS 3615 pair) -> 1024x512 JPEG for the
+    sky's Earth impostor. Clouds are part of the albedo, so they cost nothing at render time."""
+    from PIL import Image
+    W, H = 1024, 512
     dst = ROOT / "web" / "public" / "sky" / "earth.jpg"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    Image.open(src).convert("RGB").resize((1024, 512), Image.LANCZOS).save(dst, quality=88, optimize=True, progressive=True)
-    print(f"earth texture: {dst} ({human(dst.stat().st_size)})")
+    base = np.asarray(Image.open(RAW / "bluemarble-2048.png").convert("RGB").resize((W, H), Image.LANCZOS), np.float32) / 255
+    a = cloud_opacity(RAW / "flat_earth_Largest_still.0330.jpg", RAW / "earth_noClouds.0330.jpg", W, H)[..., None]
+    out = base * (1 - a) + np.array([0.96, 0.97, 0.98], np.float32) * a
+    Image.fromarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8)).save(dst, quality=88, optimize=True, progressive=True)
+    print(f"earth texture: {dst} ({human(dst.stat().st_size)}), cloud cover (a > 0.5) {float((a > 0.5).mean()):.1%}")
 
 
 # --------------------------------------------------------------------- meta

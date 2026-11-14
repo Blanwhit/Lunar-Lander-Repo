@@ -30,6 +30,7 @@ import { moonOrientation } from './orientation';
 import type { SiteReport } from './api/siteApi';
 import { InfoPanel } from './infoPanel';
 import { SitePopup, createHint } from './sitePopup';
+import { SunGlare, sunVisibleFraction } from './sunGlare';
 import { gmst } from './time';
 import { skyFS, skyVS } from './terrain/shaders';
 import { TileTree, type FrameInfo, type LightParams } from './terrain/TileTree';
@@ -287,6 +288,7 @@ async function main() {
   const sky = new Mesh(skyGeo, skyMat);
   sky.frustumCulled = false;
   sky.renderOrder = 0;
+  const glare = new SunGlare(skyGeo);
 
   const scene = new Scene();
   const dummyCam = new Camera();
@@ -345,7 +347,7 @@ async function main() {
   let last = performance.now();
   const perf = { frames: 0, renders: 0, fps: 0, lastFpsT: last, frameMs: 0 };
   (window as any).__moon = {
-    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, hud, ephem, setTime, overlay, popup,
+    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, glare, hud, ephem, setTime, overlay, popup,
     get simMs() { return simMs; },
   };
 
@@ -403,8 +405,13 @@ async function main() {
       const ds = toSun.length(), de = toEarth.length();
       toSun.divideScalar(ds);
       toEarth.divideScalar(de);
-      skyMat.uniforms.uSun.value = [toSun.x, toSun.y, toSun.z, Math.asin((R_SUN_KM * 1000) / ds)];
+      const sunR = Math.asin((R_SUN_KM * 1000) / ds);
+      skyMat.uniforms.uSun.value = [toSun.x, toSun.y, toSun.z, sunR];
       skyMat.uniforms.uEarth.value = [toEarth.x, toEarth.y, toEarth.z, Math.asin((R_EARTH_KM * 1000) / de)];
+      // glare, faded by how much of the disc the terrain / limb leaves visible
+      const vis = sunVisibleFraction(st.camPos, toSun, sunR, (d) => tree.heightAt(d));
+      const tanHalf: [number, number] = [Math.tan(FOV_Y / 2) * aspect, Math.tan(FOV_Y / 2)];
+      if (glare.update(st.viewRot, toSun, sunR, vis, tanHalf, (2 * Math.tan(FOV_Y / 2)) / h, dt)) needsRender = true;
     }
     scene.add(sky);
     // scale bar: ground metres per CSS pixel at the view centre (the pivot)
@@ -412,6 +419,7 @@ async function main() {
     const dPivot = Math.hypot(st.camPos[0] - pv[0], st.camPos[1] - pv[1], st.camPos[2] - pv[2]);
     hud.setScale((dPivot * 2 * Math.tan(FOV_Y / 2)) / lodH);
     for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
+    if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
     renderer.render(scene, dummyCam);
     // keep the site popup attached to its surface point

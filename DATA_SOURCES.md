@@ -110,15 +110,23 @@ deeper tiles reuse that texture.
 
 | Product | Publisher | URL | Version | Resolution | Frame | Size |
 |---|---|---|---|---|---|---|
-| **Deep Star Maps 2020**, `starmap_2020_8k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (galactic set updated 2021-01-04; we use the celestial set) | 8192 × 4096 (22.8 px/deg) | **ICRF/J2000 equatorial**, plate carrée, centred on RA 0h, RA increasing to the left | 131 MB |
+| **Deep Star Maps 2020**, stars layer `hiptyc_2020_16k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (celestial set) | 16384 × 8192 (45.5 px/deg) | **ICRF/J2000 equatorial**, plate carrée, centred on RA 0h, RA increasing to the left | 71 MB |
+| **Deep Star Maps 2020**, Milky Way layer `milkyway_2020_8k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (celestial set) | 8192 × 4096 (22.8 px/deg) | same | 137 MB |
 
-Built from Hipparcos-2, Tycho-2 and Gaia DR2 (1.7 billion stars). Credit: "NASA/Goddard Space
+The stars layer is Hipparcos-2 + Tycho-2 point sources on an exactly black background; the Milky
+Way layer is the diffuse glow built from Gaia DR2 (1.7 billion stars). Until 2026-11-14 the
+viewer used the combined `starmap_2020_8k.exr`; the separate layers let the stars stay crisp
+points while the Milky Way is graded on its own (its packed copy is still in `data/raw_packed`). Credit: "NASA/Goddard Space
 Flight Center Scientific Visualization Studio. Gaia DR2: ESA/Gaia/DPAC. Constellation boundaries:
 IAU." The challenge resources contain no star data.
 
-The pipeline resamples the map into an OpenGL-convention cubemap. It writes a 512² ETC1S cubemap
-for the first frames and a 2048² UASTC cubemap (about 1 face pixel per source pixel) that loads
-afterwards.
+The pipeline composites the two layers in linear light at 8192 × 4096: the stars layer is
+area-averaged down by 2 (faint stars stay single pixels), multiplied by `star_gain`, and only the
+part of a star above `bloom_threshold` feeds a small Gaussian bloom, so bright stars stand out
+without blurring faint ones. The Milky Way gets its black point at the median sky, is partly
+desaturated (`milkyway_saturation`) and kept faint (`milkyway_gain`). All settings are in
+`pipeline/config.json` under `stars`. The result is resampled into OpenGL-convention cubemaps:
+512² for the first frames and 2048² (about 1 face pixel per source pixel) afterwards, both ETC1S.
 
 ## 5. Sun and Earth positions (time-dependent)
 
@@ -143,11 +151,21 @@ at t.
 
 | Product | Publisher | URL | Version | Resolution | Size |
 |---|---|---|---|---|---|
-| **Blue Marble**, seamless true-colour mosaic of the Earth (`bluemarble-2048.png`) | NASA Goddard SVS 2915 (Blue Marble imagery: NASA Earth Observatory, Reto Stöckli et al.) | https://svs.gsfc.nasa.gov/2915 | 2004 | 2048 × 1024, equirectangular, 180°W at the left edge | 1.5 MB → 82 KB JPEG (1024×512) |
+| **Blue Marble**, seamless true-colour mosaic of the Earth (`bluemarble-2048.png`) | NASA Goddard SVS 2915 (Blue Marble imagery: NASA Earth Observatory, Reto Stöckli et al.) | https://svs.gsfc.nasa.gov/2915 | 2004 | 2048 × 1024, equirectangular, 180°W at the left edge | 1.5 MB |
+| **Equirectangular Earth**, with clouds (`flat_earth_Largest_still.0330.jpg`) and without (`earth_noClouds.0330.jpg`) | NASA Goddard SVS 3615 | https://svs.gsfc.nasa.gov/3615 | 2009 | 8192 × 4096 and 2048 × 1024, same layout | 6.0 MB + 0.36 MB |
 
 Public domain (NASA). Seen from the Moon the Earth is about 1.9° wide (~50 px at 1080p), so
-1024×512 is plenty. The Blue Marble Next Generation host (`eoimages.gsfc.nasa.gov`) wasn't
-reachable from the build machine, so the SVS copy was used.
+1024×512 is plenty. The Blue Marble Next Generation host (`eoimages.gsfc.nasa.gov`, which also
+served the Blue Marble cloud layer) wasn't reachable from the build machine, so SVS copies were
+used.
+
+Clouds: the SVS 3615 pair is the same render with and without clouds, so per-pixel cloud opacity
+is recovered as `a = (with - without) / (white - without)` (minimum over RGB), cleaned of
+coastline misregistration and the haze floor, and composited onto the Blue Marble (the SVS 3615
+ocean is a light bathymetric blue that looks wrong from space, so only its clouds are used). Its
+clouds thin out beyond ±48° latitude; the pipeline extends them to ~70° by mirroring the 26–48°
+band (offset 97° in longitude) and fades them out towards the poles. The clouds are baked into
+`earth.jpg` (145 KB), so they cost nothing at render time.
 
 ## 7. Orientation
 

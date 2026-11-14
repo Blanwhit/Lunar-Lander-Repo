@@ -260,16 +260,18 @@ after lossless compaction:
    trilinearly like the heights and stored as KTX2 with mipmaps: ETC1S for L0–L1 (small initial
    load) and UASTC + zstd for L2–L5 (no chroma blocking when magnified). Deeper tiles reuse the L5
    texture with a UV transform.
-5. **Stars**: the SVS Deep Star Map (J2000) is resampled into OpenGL-convention cubemaps. A
-   512² cubemap loads first and a 2048² one afterwards.
+5. **Stars**: the SVS Deep Star Map (J2000) stars layer (16k, crisp points; only the brightest
+   stars get a small bloom) and its Milky Way layer (faint, partly desaturated) are composited and
+   resampled into OpenGL-convention cubemaps. A 512² cubemap loads first and a 2048² one
+   afterwards.
 6. **Ephemeris** ([ephemeris.py](pipeline/ephemeris.py)): the Horizons API sends no CORS
    headers, so the browser can't query it live. The pipeline fetches Moon-centred (`500@301`),
    light-time-corrected ICRF state vectors (position + velocity) of the Sun and the Earth every
    6 h for 2000–2050. It stores them as one ~69 KB file per year in `web/public/ephem/` (3.6 MB in
    total). `--validate` checks the viewer's Moon orientation against Horizons' own sub-Earth and
    sub-solar points (see below).
-7. **Earth texture**: NASA Blue Marble (SVS 2915), downscaled to a 1024×512 JPEG (80 KB) in
-   `web/public/sky/`.
+7. **Earth texture**: NASA Blue Marble (SVS 2915) with clouds baked in (opacity recovered from
+   the SVS 3615 with/without-clouds pair), a 1024×512 JPEG (145 KB) in `web/public/sky/`.
 8. **Packing** ([pack_raw.py](pipeline/pack_raw.py)): optional, lossless, verified compression of
    the raw downloads (see above).
 
@@ -299,8 +301,15 @@ after lossless compaction:
 * **Time and sky bodies** ([ephemeris.ts](web/src/ephemeris.ts), [time.ts](web/src/time.ts)): UTC
   is converted to TDB using leap seconds plus 32.184 s. The yearly Horizons file is
   cubic-Hermite interpolated from positions and velocities, then rotated into the Moon's body frame.
-  * **Sun**: drawn as a limb-darkened 0.53° disc with a glow.
-  * **Earth**: drawn as a sphere impostor. The Blue Marble texture is rotated by Greenwich
+  * **Sun**: drawn as a limb-darkened 0.53° disc. Its glare (bright aureole, wide veil and six
+    thin diffraction spikes) is a separate additive pass after the terrain
+    ([sunGlare.ts](web/src/sunGlare.ts)), so it spills over the lunar limb and horizon. It is
+    scaled by the visible fraction of the solar disc: one ray per frame is marched from the
+    camera towards the Sun over the loaded terrain, and the smallest clearance angle acts as the
+    horizon for the disc (≈0.5 ms at the surface, ≈0 in orbit), so the glare fades as the Sun
+    sinks behind a rim or the limb. The pass is skipped when the Sun is hidden or more than 70°
+    off the view axis.
+  * **Earth**: drawn as a sphere impostor. The Blue Marble texture (clouds baked in) is rotated by Greenwich
     sidereal time and lit by the Sun, so it shows its real phase and the face turned towards the
     Moon. It also has a thin atmosphere rim.
   * Both directions are computed from the camera position rather than the Moon's centre, so the
@@ -386,7 +395,7 @@ so the terrain cost dominates. They haven't been re-measured.
 ### Initial payload (production build, measured)
 
 Everything fetched until the first frame that has all six L0 terrain tiles, their colour, the
-star background and the Sun/Earth positions. The 80 KB Earth texture loads right after:
+star background and the Sun/Earth positions. The 145 KB Earth texture loads right after:
 
 | item | size |
 |---|---:|
@@ -394,7 +403,7 @@ star background and the Sun/Earth positions. The 80 KB Earth texture loads right
 | Basis transcoder wasm | 515 KB (248 KB gzip) |
 | L0 heights (6 tiles) | 262 KB |
 | L0 colour (6 tiles, ETC1S) | 147 KB |
-| 512² star cubemap | 293 KB |
+| 512² star cubemap | 285 KB |
 | Sun/Earth ephemeris for the current year (JPL Horizons) | 69 KB |
 | **total** | **1.47 MB** (1.20 MB with gzipped wasm) |
 
@@ -429,9 +438,10 @@ date/time and compass.
   LROC WAC Hapke-normalised mosaic (NASA/GSFC/Arizona State University).
 * **Sun and Earth positions**: JPL Horizons (Solar System Dynamics group, NASA/JPL-Caltech),
   DE441-based ephemerides via the Horizons API.
-* **Earth image**: NASA Blue Marble (NASA Earth Observatory / SVS 2915, Reto Stöckli et al.).
-* **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020 (Hipparcos-2, Tycho-2,
-  Gaia DR2 / ESA/Gaia/DPAC).
+* **Earth image**: NASA Blue Marble (NASA Earth Observatory / SVS 2915, Reto Stöckli et al.);
+  clouds from NASA Goddard SVS 3615.
+* **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020, stars layer (Hipparcos-2,
+  Tycho-2) and Milky Way layer (Gaia DR2 / ESA/Gaia/DPAC).
 * Challenge: NASA Space Apps 2026, *Lunar Landing Site Navigator*. The resources it lists
   (QuickMap, Moon Trek, Horizons, CSA) were evaluated; see DATA_SOURCES.md for why the raw PDS
   products were used instead.

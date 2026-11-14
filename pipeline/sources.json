@@ -143,10 +143,17 @@
    ]
   },
   {
-   "name": "starmap_2020_8k.exr",
+   "name": "hiptyc_2020_16k.exr",
    "group": "stars",
    "urls": [
-    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_8k.exr"
+    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/hiptyc_2020_16k.exr"
+   ]
+  },
+  {
+   "name": "milkyway_2020_8k.exr",
+   "group": "stars",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/milkyway_2020_8k.exr"
    ]
   },
   {
@@ -184,6 +191,20 @@
    "group": "earth",
    "urls": [
     "https://svs.gsfc.nasa.gov/vis/a000000/a002900/a002915/bluemarble-2048.png"
+   ]
+  },
+  {
+   "name": "flat_earth_Largest_still.0330.jpg",
+   "group": "earth",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a003600/a003615/flat_earth_Largest_still.0330.jpg"
+   ]
+  },
+  {
+   "name": "earth_noClouds.0330.jpg",
+   "group": "earth",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a003600/a003615/earth_noClouds.0330.jpg"
    ]
   }
  ]

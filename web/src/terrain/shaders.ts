@@ -186,7 +186,7 @@ void main() {
 `;
 
 // Background sky in the lunar body frame: star cubemap (ICRF), the Sun (limb-darkened
-// disc + glow) and the Earth (sphere impostor: Blue Marble texture rotated by sidereal
+// disc; its glare is a separate pass, sunGlare.ts) and the Earth (sphere impostor: Blue Marble texture rotated by sidereal
 // time, lit by the Sun -> correct phase, thin atmosphere rim). Directions are given
 // relative to the camera, so parallax near the Moon is exact.
 export const skyFS = /* glsl */ `
@@ -222,8 +222,7 @@ void main() {
     float edge = clamp((uSun.w - ang) / uPixelAngle + 0.5, 0.0, 1.0);
     float mu = sqrt(max(1.0 - r * r, 0.0));
     vec3 disc = vec3(1.0, 0.97, 0.92) * (0.6 + 0.4 * mu);            // limb darkening
-    float glow = 0.6 * exp(-(r - 1.0) * 1.2) + 0.06 * pow(1.0 / max(r, 1.0), 1.2);
-    c = mix(c + vec3(1.0, 0.93, 0.82) * glow * step(1.0, r), disc, edge);
+    c = mix(c, disc, edge);   // glare: separate additive pass after the terrain (sunGlare.ts)
   }
 
   // ---- Earth

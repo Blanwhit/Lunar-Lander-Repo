@@ -129,7 +129,8 @@
   "basis_low_max_level": 1
  },
  "stars": {
-  "exr": "starmap_2020_8k.exr",
+  "stars_exr": "hiptyc_2020_16k.exr",
+  "milkyway_exr": "milkyway_2020_8k.exr",
   "face_sizes": [
    512,
    2048
@@ -140,6 +141,11 @@
    "-comp_level",
    "3"
   ],
-  "gain": 1.2
+  "star_gain": 3.2,
+  "bloom_threshold": 0.5,
+  "bloom_gain": 3.0,
+  "bloom_sigma_px": 1.8,
+  "milkyway_gain": 0.8,
+  "milkyway_saturation": 0.55
  }
 }
