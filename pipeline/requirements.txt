@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.13
+rasterio>=1.4      # bundles GDAL (used for label/CRS cross-checks)
+pyproj>=3.6
+opencv-python-headless>=4.10   # OpenEXR reading (OPENCV_IO_ENABLE_OPENEXR=1)
+pillow>=10
+requests>=2.31

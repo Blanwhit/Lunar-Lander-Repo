@@ -1,0 +1,23 @@
+{
+  "_comment": "Tile pipeline configuration. elevation_sources are composited in order (coarse -> fine); each finer source is blended in over blend_deg degrees inside its coverage edge. A tile at level L is generated only if some source covering it has res_m <= refine_factor * cell size of L, and L <= max_level (and <= the source's own max_level if given).",
+  "max_level": 11,
+  "colour_max_level": 5,
+  "refine_factor": 1.5,
+  "out_dir": "web/public/tiles",
+  "cache_dir": "data/cache",
+  "raw_dir": "data/raw",
+  "elevation_sources": [
+    {"name": "ldem64",  "img": "LDEM_64.IMG", "lbl": "LDEM_64.LBL"},
+    {"name": "ldem45s", "img": "LDEM_45S_200M.IMG", "lbl": "LDEM_45S_200M.LBL", "blend_deg": 1.0, "optional": true, "polar_flip": [1, 1]},
+    {"name": "ldem45n", "img": "LDEM_45N_200M.IMG", "lbl": "LDEM_45N_200M.LBL", "blend_deg": 1.0, "optional": true, "polar_flip": [1, 1]},
+    {"name": "sldem128", "img": "SLDEM2015_128_60S_60N_000_360_FLOAT.IMG", "lbl": "SLDEM2015_128_60S_60N_000_360_FLOAT.LBL", "blend_deg": 1.0},
+    {"name": "ldem60s", "img": "LDEM_60S_120M.IMG", "lbl": "LDEM_60S_120M.LBL", "blend_deg": 1.0, "polar_flip": [1, 1]},
+    {"name": "ldem60n", "img": "LDEM_60N_120M.IMG", "lbl": "LDEM_60N_120M.LBL", "blend_deg": 1.0, "polar_flip": [1, 1]},
+    {"name": "ldem75s", "img": "LDEM_75S_60M.IMG", "lbl": "LDEM_75S_60M.LBL", "blend_deg": 0.5, "polar_flip": [1, 1]},
+    {"name": "ldem75n", "img": "LDEM_75N_60M.IMG", "lbl": "LDEM_75N_60M.LBL", "blend_deg": 0.5, "polar_flip": [1, 1]},
+    {"name": "ldem80s", "img": "LDEM_80S_20M.IMG", "lbl": "LDEM_80S_20M.LBL", "blend_deg": 0.4, "polar_flip": [1, 1]},
+    {"name": "ldem875s", "img": "LDEM_875S_5M.IMG", "lbl": "LDEM_875S_5M.LBL", "blend_deg": 0.15, "polar_flip": [1, 1]}
+  ],
+  "colour": {"exr": "lroc_color.exr", "exposure_percentile": 99.7, "white": 0.92},
+  "stars": {"exr": "starmap_2020_8k.exr", "face_sizes": [512, 2048]}
+}

@@ -1,0 +1,13 @@
+# raw downloads, caches and generated tiles (reproducible with `make`)
+data/
+web/public/tiles/
+tools/basis/
+tools/basis_src/
+tools/*.zip
+tools/basisu.exe
+tools/basisu
+.venv/
+node_modules/
+web/dist/
+__pycache__/
+*.pyc

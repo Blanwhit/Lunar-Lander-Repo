@@ -1,0 +1,183 @@
+{
+ "_comment": "Raw source files. 'urls' are mirrors tried in parallel (chunks are spread across mirrors). See DATA_SOURCES.md for provenance.",
+ "files": [
+  {
+   "name": "LDEM_16.IMG",
+   "group": "lola_global",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/cylindrical/img/ldem_16.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/CYLINDRICAL/IMG/LDEM_16.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_16.LBL",
+   "group": "lola_global",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/CYLINDRICAL/IMG/LDEM_16.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_64.IMG",
+   "group": "lola_global",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/cylindrical/img/ldem_64.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/CYLINDRICAL/IMG/LDEM_64.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_64.LBL",
+   "group": "lola_global",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/CYLINDRICAL/IMG/LDEM_64.LBL"
+   ]
+  },
+  {
+   "name": "SLDEM2015_128_60S_60N_000_360_FLOAT.IMG",
+   "group": "sldem",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/SLDEM2015/GLOBAL/FLOAT_IMG/SLDEM2015_128_60S_60N_000_360_FLOAT.IMG"
+   ]
+  },
+  {
+   "name": "SLDEM2015_128_60S_60N_000_360_FLOAT.LBL",
+   "group": "sldem",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/SLDEM2015/GLOBAL/FLOAT_IMG/SLDEM2015_128_60S_60N_000_360_FLOAT.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_60S_120M.IMG",
+   "group": "polar",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_60s_120m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_60S_120M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_60S_120M.LBL",
+   "group": "polar",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_60S_120M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_60N_120M.IMG",
+   "group": "polar",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_60n_120m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_60N_120M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_60N_120M.LBL",
+   "group": "polar",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_60N_120M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_75S_60M.IMG",
+   "group": "polar",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_75s_60m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_75S_60M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_75S_60M.LBL",
+   "group": "polar",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_75S_60M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_75N_60M.IMG",
+   "group": "polar",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_75n_60m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_75N_60M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_75N_60M.LBL",
+   "group": "polar",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_75N_60M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_80S_20M.IMG",
+   "group": "polar_hires",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_80s_20m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_80S_20M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_80S_20M.LBL",
+   "group": "polar_hires",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_80S_20M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_875S_5M.IMG",
+   "group": "polar_hires",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_875s_5m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_875S_5M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_875S_5M.LBL",
+   "group": "polar_hires",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_875S_5M.LBL"
+   ]
+  },
+  {
+   "name": "lroc_color.exr",
+   "group": "colour",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/lroc_color.exr"
+   ]
+  },
+  {
+   "name": "starmap_2020_8k.exr",
+   "group": "stars",
+   "urls": [
+    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_8k.exr"
+   ]
+  },
+  {
+   "name": "LDEM_45S_200M.IMG",
+   "group": "polar45",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_45s_200m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_45S_200M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_45S_200M.LBL",
+   "group": "polar45",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_45S_200M.LBL"
+   ]
+  },
+  {
+   "name": "LDEM_45N_200M.IMG",
+   "group": "polar45",
+   "urls": [
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx/data/lola_gdr/polar/img/ldem_45n_200m.img",
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_45N_200M.IMG"
+   ]
+  },
+  {
+   "name": "LDEM_45N_200M.LBL",
+   "group": "polar45",
+   "urls": [
+    "http://imbrium.mit.edu/DATA/LOLA_GDR/POLAR/IMG/LDEM_45N_200M.LBL"
+   ]
+  }
+ ]
+}
