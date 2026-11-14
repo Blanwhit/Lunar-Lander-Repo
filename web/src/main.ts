@@ -157,17 +157,15 @@ async function main() {
     }
     needsRender = true;
   };
-  // a right *click* (press + release without dragging) inspects; a right drag still rotates
-  let rDown: { x: number; y: number; t: number } | null = null;
+  // the right button only inspects (the globe controls ignore it): every right click
+  // on the canvas picks the spot under the cursor at release
+  let rDown = false;
   canvas.addEventListener('pointerdown', (e) => {
-    rDown = e.button === 2 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+    rDown = e.button === 2;
   });
   canvas.addEventListener('pointerup', (e) => {
     if (e.button !== 2 || !rDown) return;
-    const moved = Math.hypot(e.clientX - rDown.x, e.clientY - rDown.y);
-    const quick = performance.now() - rDown.t < 700;
-    rDown = null;
-    if (moved > 5 || !quick) return;
+    rDown = false;
     const hit = pickSurface(e.clientX, e.clientY);
     if (!hit) return;
     dismissHint();

@@ -110,11 +110,13 @@ export class GlobeControls {
 
   // --------------------------------------------------------------- events
   private onDown = (e: PointerEvent) => {
+    // the right button is reserved for the site popup (main.ts): no pan / rotate
+    if (e.button === 2) return;
     this.flyGoal = null;
     this.el.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.dragging = true;
-    this.mode = e.button === 2 || e.shiftKey || e.ctrlKey ? 'rotate' : 'pan';
+    this.mode = e.shiftKey || e.ctrlKey ? 'rotate' : 'pan';
     this.omega.set(0, 0, 0);
     this.headingVel = 0;
     this.northing = false;
