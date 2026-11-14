@@ -18,6 +18,7 @@ import {
 } from 'three';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { GlobeControls } from './controls';
+import { Compass } from './compass';
 import { R_MOON, H_MAX_GLOBAL, latLonToDir } from './geom';
 void H_MAX_GLOBAL;
 import { moonOrientation } from './orientation';
@@ -70,6 +71,7 @@ async function main() {
   controls.maxDist = (R_MOON / Math.sin(FOV_Y / 2)) * 1.15;
   controls.setView(0, 0, controls.maxDist);
   applyHash(controls);
+  const compass = new Compass(document.body, () => controls.resetNorth());
   window.addEventListener('hashchange', () => applyHash(controls));
 
   // ---- sky
@@ -157,6 +159,7 @@ async function main() {
     frame++;
 
     const st = controls.state();
+    compass.update(controls.heading());
     const w = renderer.domElement.width, h = renderer.domElement.height;
     const aspect = w / h;
     const camR = Math.hypot(...st.camPos);

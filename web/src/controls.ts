@@ -29,6 +29,7 @@ export class GlobeControls {
   fovY = 45 * DEG;
   private omega = new Vector3(); // angular velocity (rad/s) about axis
   private headingVel = 0;
+  private northing = false; // animating back to north-up (compass click)
   private dragging = false;
   private lastMove = 0;
   private pointers = new Map<number, { x: number; y: number }>();
@@ -55,6 +56,9 @@ export class GlobeControls {
     this.dist = Math.min(this.maxDist, Math.max(this.minDist, dist));
     this.logDistGoal = Math.log(this.dist);
     if (tiltDeg !== undefined) this.tiltUser = this.tiltGoal = tiltDeg * DEG - this.autoTilt(this.dist);
+    this.northing = false;
+    this.omega.set(0, 0, 0);
+    this.headingVel = 0;
     this.changed = true;
   }
 
@@ -76,6 +80,24 @@ export class GlobeControls {
     return Math.min(82 * DEG, Math.max(0, this.autoTilt(this.dist) + this.tiltUser));
   }
 
+  /** compass bearing of the screen-up direction at the target, radians (0 = north, +east).
+   *  Exactly at a pole north is undefined; 0 is returned there. */
+  heading(): number {
+    const up = this.tgt;
+    const north = new Vector3(0, 0, 1).addScaledVector(up, -up.z);
+    if (north.lengthSq() < 1e-12) return 0;
+    north.normalize();
+    const s = -north.clone().cross(this.fwd).dot(up);
+    return Math.atan2(s, north.dot(this.fwd));
+  }
+
+  /** smoothly turn the view so north is up (keeps position, zoom and tilt) */
+  resetNorth() {
+    this.headingVel = 0;
+    this.northing = true;
+    this.changed = true;
+  }
+
   // --------------------------------------------------------------- events
   private onDown = (e: PointerEvent) => {
     this.el.setPointerCapture(e.pointerId);
@@ -84,6 +106,7 @@ export class GlobeControls {
     this.mode = e.button === 2 || e.shiftKey || e.ctrlKey ? 'rotate' : 'pan';
     this.omega.set(0, 0, 0);
     this.headingVel = 0;
+    this.northing = false;
     this.pinch = null;
     this.lastMove = performance.now();
   };
@@ -209,6 +232,17 @@ export class GlobeControls {
         moved = true;
       } else this.headingVel = 0;
     }
+    if (this.northing) {
+      const h = this.heading();
+      if (Math.abs(h) < 1e-4) {
+        this.rotateHeading(h);
+        this.northing = false;
+      } else {
+        // ease out; rotateHeading(+a) turns the bearing towards west, i.e. reduces it
+        this.rotateHeading(h * (1 - Math.exp(-dt * 7)));
+      }
+      moved = true;
+    }
     // smooth zoom
     const ld = Math.log(this.dist);
     const diff = this.logDistGoal - ld;
@@ -249,7 +283,7 @@ export class GlobeControls {
   }
 
   isAnimating(): boolean {
-    return this.dragging || this.omega.lengthSq() > 0 || this.headingVel !== 0 ||
+    return this.dragging || this.northing || this.omega.lengthSq() > 0 || this.headingVel !== 0 ||
       Math.abs(this.logDistGoal - Math.log(this.dist)) > 1e-4;
   }
 }

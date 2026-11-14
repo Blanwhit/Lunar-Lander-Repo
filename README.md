@@ -2,9 +2,11 @@
 
 A static website that shows only the Moon, in 3D, against the real star sky. Terrain is streamed
 level-of-detail from raw NASA elevation data, from the whole globe down to **5 m/px at the lunar
-south pole**. The page is a full-screen canvas with no text or UI.
+south pole**. The page is a full-screen canvas with no text; the only control is a compass.
 
 * **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
+* **Compass** (bottom-right, Google-Earth style): the red needle points to lunar north on
+  screen; click it to turn the view back to north-up (position, zoom and tilt are kept).
 * **Wheel / pinch**: zoom, from the whole Moon down to just above the surface. The view tilts
   towards the horizon automatically near the ground.
 * Optional deep link (no UI): `#lat,lon,distance_m[,heading_deg[,tilt_deg]]`. For example,
