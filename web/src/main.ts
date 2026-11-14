@@ -27,6 +27,8 @@ import { R_MOON, H_MAX_GLOBAL, H_MIN_GLOBAL, latLonToDir } from './geom';
 import { Hud } from './hud';
 import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
+import type { SiteReport } from './api/siteApi';
+import { InfoPanel } from './infoPanel';
 import { SitePopup, createHint } from './sitePopup';
 import { gmst } from './time';
 import { skyFS, skyVS } from './terrain/shaders';
@@ -118,22 +120,40 @@ async function main() {
   let site: { pos: Vector3; lat: number; lon: number } | null = null;
   let siteToken = 0;
   let siteTimer = 0;
+  // "More info": full site report (power / connectivity / landing) in the top-left corner
+  const info = new InfoPanel(document.body);
   popup.onClose = () => {
     site = null;
     siteToken++;
+    info.hide();
     needsRender = true;
   };
+  popup.onMoreInfo = () => (info.isOpen ? info.hide() : info.show());
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F3' && site) {
+      e.preventDefault();
+      if (info.isOpen) info.hide();
+      else info.show();
+    }
+  });
   const scoreSite = async () => {
     if (!site) return;
     const token = ++siteToken;
     popup.setLoading();
+    info.setLoading(site.lat, site.lon);
     try {
       const api = await (window as any).__moon.siteApi();
-      const r = await api.query({ lat: site.lat, lon: site.lon, time: simMs });
-      if (token === siteToken) popup.setScore(r.feasibility.score);
+      const r: SiteReport = await api.query({ lat: site.lat, lon: site.lon, time: simMs });
+      if (token === siteToken) {
+        popup.setScore(r.feasibility.score);
+        info.setReport(r);
+      }
     } catch (e) {
       console.warn('site query', e);
-      if (token === siteToken) popup.setScore(null);
+      if (token === siteToken) {
+        popup.setScore(null);
+        info.setError();
+      }
     }
     needsRender = true;
   };
@@ -215,6 +235,7 @@ async function main() {
       // the score depends on the time: recompute once the user stops stepping
       clearTimeout(siteTimer);
       popup.setLoading();
+      info.setLoading(site.lat, site.lon);
       siteTimer = window.setTimeout(() => void scoreSite(), 300);
     }
     const token = ++timeToken;

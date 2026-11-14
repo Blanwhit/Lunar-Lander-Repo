@@ -102,6 +102,8 @@ export class SitePopup {
   private open = false;
   /** called when the popup is closed by the user */
   onClose: () => void = () => {};
+  /** called when "More info" is clicked */
+  onMoreInfo: () => void = () => {};
 
   constructor(parent: HTMLElement) {
     const style = document.createElement('style');
@@ -125,7 +127,8 @@ export class SitePopup {
     this.coords = el.querySelector('.coords .v') as HTMLSpanElement;
     this.feas = el.querySelector('.feas') as HTMLDivElement;
     (el.querySelector('.close') as HTMLButtonElement).addEventListener('click', () => this.close());
-    // "More info" / "Enter VR": intentionally no action yet
+    (el.querySelector('[data-act="info"]') as HTMLButtonElement).addEventListener('click', () => this.onMoreInfo());
+    // "Enter VR": intentionally no action yet
     for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const) el.addEventListener(ev, (e) => e.stopPropagation());
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.open) this.close();
