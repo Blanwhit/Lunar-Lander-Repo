@@ -26,6 +26,7 @@ import { R_MOON, latLonToDir, texelSize, type Vec3 } from '../geom';
 import { moonOrientation, type OrientationProvider } from '../orientation';
 import { TileTerrain } from './terrain';
 import { albedo, simulateRegolith } from './thermal';
+import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig, type FeasibilityInputs, type FeasibilityResult } from './feasibility';
 
 // ------------------------------------------------------------------------------- interface
 export interface SiteQuery {
@@ -118,6 +119,9 @@ export interface SiteReport {
     method: string;
   };
 
+  /** 0-100 % landing-site feasibility (see feasibility.ts and README) */
+  feasibility: FeasibilityResult & { inputs: FeasibilityInputs; referenceYear: number };
+
   meta: {
     horizonAzimuthStepDeg: number;
     horizonMaxDistanceKm: number;
@@ -166,7 +170,13 @@ export interface SiteApiOptions {
   temperatureModel?: TemperatureModel;
   /** horizon azimuth resolution (deg); default 1 */
   azimuthStepDeg?: number;
+  feasibilityConfig?: FeasibilityConfig;
 }
+
+/** fixed window for the "annual" feasibility statistics (shared with the overlay pipeline) */
+export const FEAS_REF_YEAR = 2026;
+/** radius of the ring used for local prominence (m) */
+export const PROMINENCE_RING_M = 3000;
 
 // --------------------------------------------------------------------- temperature model
 /**
@@ -397,6 +407,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     let aspect: number | null = (Math.atan2(-dzde, -dzdn) / DEG + 360) % 360;
     if (slopeDeg < 0.05) aspect = null;
     const normal = f.up.clone().addScaledVector(f.east, -dzde).addScaledVector(f.north, -dzdn).normalize();
+    // local prominence: height above the mean of 8 points on a 3 km ring
+    const ring = await terrain.until(() =>
+      [0, 45, 90, 135, 180, 225, 270, 315].map((az) => terrain.sample(dirAt(f, az, PROMINENCE_RING_M), site.level).h));
+    const prominence = site.h - ring.reduce((a, b2) => a + b2, 0) / ring.length;
 
     // horizon + bodies
     const hp = await horizon(lat, lon, hObs);
@@ -423,6 +437,8 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       else followSet = after;
     }
     const mins = (t: number | null) => (t === null ? null : Math.round((t - ms) / 6e3) / 10);
+    const earthRise = nextRise ?? followRise, earthSet = nextSet ?? followSet;
+    const earthSetT = nextSet;
 
     // power
     const sunMargin = async (t: number) => (await geo(t)).sun.marginDeg;
@@ -458,6 +474,15 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       centreFraction: total ? centre / total : 0,
     };
 
+    // feasibility "annual" statistics over the fixed reference year (6 h samples)
+    let refSun = 0, refEarth = 0, refN = 0;
+    for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
+      const g = await geo(t);
+      refN++;
+      refSun += g.sun.visibleFraction;
+      if (g.earth.marginDeg - mask > 0) refEarth++;
+    }
+
     // absorbed-flux history on the local ground facet (30 min steps, ~3 lunations back)
     const HIST_STEP = 1800, HIST_DAYS = 88.6;
     const t0h = clampT(ms - HIST_DAYS * 86400e3);
@@ -489,6 +514,21 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       anyPartFractionYear: illum.anyPartFraction,
     });
 
+    const windowH = days * 24;
+    const feasInputs: FeasibilityInputs = {
+      sunVisibleNow: vf,
+      sunHoursRemaining: sunUp ? (sunSet === null ? windowH : (sunSet - ms) / 3600e3) : 0,
+      annualIllumination: refN ? refSun / refN : 0,
+      earthVisibleNow: earthFrac,
+      linkMarginDeg: Math.max(0, earth.marginDeg - mask),
+      earthHoursRemaining: visibleNow ? (earthSetT === null ? windowH : (earthSetT - ms) / 3600e3) : 0,
+      annualEarthVisibility: refN ? refEarth / refN : 0,
+      slopeDeg,
+      temperatureK: temperature.surfaceK,
+      prominenceM: prominence,
+    };
+    const feas = feasibility(feasInputs, opts.feasibilityConfig ?? DEFAULT_FEASIBILITY);
+
     const r2 = (x: number) => Math.round(x * 100) / 100;
     const r3 = (x: number) => Math.round(x * 1000) / 1000;
     const round = (g: BodyGeometry): BodyGeometry => ({
@@ -496,7 +536,6 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       marginDeg: r3(g.marginDeg), angularRadiusDeg: r3(g.angularRadiusDeg), visibleFraction: r3(g.visibleFraction),
       distanceKm: Math.round(g.distanceKm),
     });
-    const earthRise = nextRise ?? followRise, earthSet = nextSet ?? followSet;
 
     return {
       query: { lat, lon, timeUtc: iso(ms)!, observerHeightM: hObs },
@@ -535,6 +574,16 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
         },
       },
       temperature,
+      feasibility: {
+        ...feas,
+        score: r2(feas.score),
+        combined: r2(feas.combined),
+        gate: r3(feas.gate),
+        categories: { power: r2(feas.categories.power), comms: r2(feas.categories.comms), landing: r2(feas.categories.landing) },
+        subScores: Object.fromEntries(Object.entries(feas.subScores).map(([k, v]) => [k, r2(v)])) as FeasibilityResult['subScores'],
+        inputs: Object.fromEntries(Object.entries(feasInputs).map(([k, v]) => [k, r3(v)])) as FeasibilityInputs,
+        referenceYear: FEAS_REF_YEAR,
+      },
       meta: {
         horizonAzimuthStepDeg: azStep,
         horizonMaxDistanceKm: Math.round(hp.maxDistanceKm),

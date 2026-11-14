@@ -25,6 +25,7 @@ import { Compass } from './compass';
 import { Ephemeris } from './ephemeris';
 import { R_MOON, H_MAX_GLOBAL, latLonToDir } from './geom';
 import { Hud } from './hud';
+import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
 import { gmst } from './time';
 import { skyFS, skyVS } from './terrain/shaders';
@@ -34,6 +35,7 @@ interface TileMeta {
   maxLevel: number;
   colourMaxLevel: number;
   stars?: string[]; // cubemap files, low -> high resolution
+  feasibility?: { samples: number; maxLevel: number }; // score tiles (pipeline/feasibility_grid.py)
 }
 
 const DEG = Math.PI / 180;
@@ -90,11 +92,29 @@ async function main() {
   const bodyToJ2000 = new Matrix3();
 
   const hud = new Hud(document.body, [tMin, tMax], (ms) => void setTime(ms));
+
+  // feasibility heatmap overlay (off by default; nothing is loaded until switched on)
+  const overlay = meta.feasibility ? new FeasibilityOverlay(base, meta.feasibility, ephem, moonOrientation) : null;
+  let overlayTimer = 0;
+  const overlayTime = (ms: number, immediate = false) => {
+    if (!overlay?.enabled) return;
+    clearTimeout(overlayTimer);
+    overlayTimer = window.setTimeout(() => void overlay.setTime(ms), immediate ? 0 : 150);
+  };
+  if (overlay) overlay.onChange = () => (needsRender = true);
+  hud.onFeasibility = (on) => {
+    if (!overlay) return;
+    overlay.enabled = on;
+    tree.feasProvider = on ? (L, f, x, y) => overlay.lookup(L, f, x, y) : null;
+    if (on) overlayTime(simMs, true);
+    needsRender = true;
+  };
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
 
   async function setTime(ms: number) {
     simMs = ms;
     hud.setTime(ms);
+    overlayTime(ms);
     const token = ++timeToken;
     const st = await ephem.at(ms);
     if (token !== timeToken) return; // a newer request superseded this one
@@ -204,7 +224,7 @@ async function main() {
   let last = performance.now();
   const perf = { frames: 0, renders: 0, fps: 0, lastFpsT: last, frameMs: 0 };
   (window as any).__moon = {
-    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, hud, ephem, setTime,
+    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, hud, ephem, setTime, overlay,
     get simMs() { return simMs; },
   };
 
@@ -271,6 +291,7 @@ async function main() {
     const dPivot = Math.hypot(st.camPos[0] - pv[0], st.camPos[1] - pv[1], st.camPos[2] - pv[2]);
     hud.setScale((dPivot * 2 * Math.tan(FOV_Y / 2)) / lodH);
     for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
+    overlay?.endFrame();
     renderer.render(scene, dummyCam);
     perf.renders++;
     perf.frameMs = performance.now() - t0;

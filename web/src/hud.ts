@@ -23,6 +23,22 @@ const CSS = `
 .moon-scale .label { font-size: 13px; font-variant-numeric: tabular-nums; letter-spacing: 0.01em;
   text-shadow: 0 1px 2px #000, 0 0 4px #000; }
 
+/* centre group: date/time box + feasibility toggle */
+.moon-centre { display: flex; align-items: stretch; gap: 10px; }
+.moon-feas { all: unset; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  padding: 6px 12px; background: rgba(32, 33, 36, 0.86); border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  cursor: pointer; color: #e8eaed; -webkit-tap-highlight-color: transparent; }
+.moon-feas:hover { background: rgba(60, 64, 67, 0.92); }
+.moon-feas:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 2px; }
+.moon-feas .lbl { font-size: 12px; font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; }
+.moon-feas .row { display: flex; align-items: center; gap: 8px; }
+.moon-feas .sw { position: relative; width: 34px; height: 18px; border-radius: 9px; background: #5f6368; transition: background-color 150ms ease; flex: none; }
+.moon-feas .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: #f1f3f4; box-shadow: 0 1px 2px rgba(0,0,0,0.5); transition: transform 150ms ease; }
+.moon-feas[aria-checked="true"] .sw { background: linear-gradient(90deg, #db1f17, #fad629 55%, #21b245); }
+.moon-feas[aria-checked="true"] .sw::after { transform: translateX(16px); }
+.moon-feas .state { font-size: 13px; font-weight: 600; min-width: 26px; }
+
 /* date / time */
 .moon-time { display: flex; align-items: center; gap: 2px; padding: 4px 12px;
   background: rgba(32, 33, 36, 0.86); border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.6);
@@ -44,7 +60,7 @@ const CSS = `
 @media (pointer: coarse) { .moon-time button { height: 22px; min-width: 30px; } }
 @media (max-width: 560px) {
   .moon-hud { grid-template-columns: 1fr 1fr; grid-template-areas: "time time" "scale right"; row-gap: 10px; }
-  .moon-hud .moon-time { grid-area: time; justify-self: center; }
+  .moon-hud .moon-centre { grid-area: time; justify-self: center; flex-wrap: wrap; justify-content: center; }
   .moon-hud .moon-scale { grid-area: scale; }
   .moon-hud .slot-right { grid-area: right; }
 }
@@ -90,6 +106,9 @@ export class Hud {
   private lastScale = '';
   private lastPx = -1;
   private t = 0;
+  private feasBtn!: HTMLButtonElement;
+  /** called when the user toggles the feasibility overlay */
+  onFeasibility: (on: boolean) => void = () => {};
 
   constructor(
     parent: HTMLElement,
@@ -148,12 +167,28 @@ export class Hud {
     this.rightSlot = document.createElement('div');
     this.rightSlot.className = 'slot-right';
 
-    root.append(scale, time, this.rightSlot);
+    // feasibility overlay toggle (right of the time box)
+    const feas = document.createElement('button');
+    feas.type = 'button';
+    feas.className = 'moon-feas';
+    feas.setAttribute('role', 'switch');
+    feas.setAttribute('aria-checked', 'false');
+    feas.title = 'Feasibility heatmap: red 0 % -> yellow 50 % -> green 100 %';
+    feas.innerHTML = '<span class="lbl">Feasibility Overlay:</span><span class="row"><span class="sw"></span><span class="state">OFF</span></span>';
+    feas.addEventListener('click', () => this.setFeasibility(feas.getAttribute('aria-checked') !== 'true', true));
+    this.feasBtn = feas;
+    const centre = document.createElement('div');
+    centre.className = 'moon-centre';
+    centre.append(time, feas);
+
+    root.append(scale, centre, this.rightSlot);
     parent.appendChild(root);
     this.root = root;
     // keep pointer/wheel interaction on the bar from reaching the globe controls
-    for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const)
+    for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const) {
       time.addEventListener(ev, (e) => e.stopPropagation());
+      feas.addEventListener(ev, (e) => e.stopPropagation());
+    }
   }
 
   private field(key: FieldKey, label: string): HTMLDivElement {
@@ -234,6 +269,12 @@ export class Hud {
       if (el.textContent !== v[k]) el.textContent = v[k];
       el.setAttribute('aria-valuenow', v[k]);
     }
+  }
+
+  setFeasibility(on: boolean, notify = false) {
+    this.feasBtn.setAttribute('aria-checked', String(on));
+    (this.feasBtn.querySelector('.state') as HTMLElement).textContent = on ? 'ON' : 'OFF';
+    if (notify) this.onFeasibility(on);
   }
 
   /** metres per CSS pixel at the view centre */

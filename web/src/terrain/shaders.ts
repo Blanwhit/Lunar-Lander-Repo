@@ -115,6 +115,10 @@ uniform float uAmbient;
 uniform float uExposure;
 uniform vec3 uEarthDir;      // body-frame unit vector towards the Earth
 uniform float uEarthshine;   // earthshine intensity (scaled by the Earth's phase)
+uniform sampler2D uFeas;     // feasibility score (R8, 0..1 = 0..100 %), corner-aligned samples
+uniform vec3 uFeasXf;        // (scale, offsetU, offsetV): tile uv -> score tile uv
+uniform float uFeasOn;       // 1 = draw the heatmap
+uniform float uFeasN;        // samples per score-tile side
 
 out vec4 fragColor;
 
@@ -153,6 +157,17 @@ void main() {
   vec3 c = albedo * (f * uSun + fe * uEarthshine + uAmbient) * uExposure;
   // gentle shoulder to avoid harsh clipping
   c = c / (1.0 + 0.15 * c);
+  if (uFeasOn > 0.5) {
+    // red (0 %) -> yellow (50 %) -> green (100 %), smooth; view-angle relief keeps the
+    // terrain readable on the night side as well
+    vec2 fuv = ((uFeasXf.yz + vUv * uFeasXf.x) * (uFeasN - 1.0) + 0.5) / uFeasN;
+    float sc = texture(uFeas, fuv).r;
+    vec3 red = vec3(0.86, 0.12, 0.09), yellow = vec3(0.98, 0.84, 0.16), green = vec3(0.13, 0.70, 0.27);
+    vec3 ramp = sc < 0.5 ? mix(red, yellow, sc * 2.0) : mix(yellow, green, sc * 2.0 - 1.0);
+    ramp = pow(ramp, vec3(2.2));
+    float relief = 0.55 + 0.45 * max(dot(n, V), 0.0);
+    c = mix(c, ramp * relief, 0.72);
+  }
   fragColor = vec4(toSRGB(c), 1.0);
 }
 `;

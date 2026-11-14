@@ -13,6 +13,10 @@ bar along the bottom:
   PgUp/PgDn keys work on a focused field. The date order follows the browser's locale. Changing
   the date to the 31st and then the month clamps to the month's length. The range is limited to
   the ephemeris (2000-01-01 to 2050-12-31). It starts at the current time.
+* **Feasibility Overlay** (right of the date/time box): an ON/OFF switch. When it's on, every
+  point of the Moon is coloured by its landing-site feasibility at the selected date and time,
+  on a smooth red (0 %) → yellow (50 %) → green (100 %) scale (see
+  [Feasibility score](#feasibility-score)).
 * **Compass** (bottom-right, Google-Earth style): the red needle points to lunar north on
   screen; click it to turn the view back to north-up (position, zoom and tilt are kept).
 * **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
@@ -125,6 +129,71 @@ at the point over the preceding three lunations (30-minute steps). Pass
 - **Range and speed:** times are limited to the ephemeris range (2000–2050). A query takes
   ~0.2–1.5 s once tiles are cached; the first query in a new area also loads tiles (~40 KB
   each).
+
+## Feasibility score
+
+A 0–100 % landing-site score with three categories: **power generation**, **Earth
+connectivity** and **landing**. It's built from every quantity the Site API reports and
+combined in three tiers ([feasibility.ts](web/src/api/feasibility.ts)). The overlay and the
+API share this module, so they combine their inputs identically.
+
+1. **Utility curves.** Each raw sub-factor is mapped to 0–100 by a piecewise-linear curve.
+   A curve can declare a *knockout*, a value at which the site is impossible.
+2. **Category scores.** Sub-factors combine into category scores, and categories into an
+   overall score, with a weighted power mean M_p = (Σ wᵢ sᵢᵖ)^(1/p). With p = −2 the score is
+   pulled toward the weakest factor without that factor erasing everything else. Scores are
+   floored at 1 so that p < 0 stays finite.
+3. **Gates.** Critical categories have a gate: gᵢ = 1 if sᵢ ≥ τᵢ, else (sᵢ/τᵢ)^k. The final
+   score is clamp(G·M, 1, 100), where G = Πgᵢ, and G = 0 on any knockout.
+
+Defaults. **All of these are placeholders; replace them with your lander's tolerances** in
+`DEFAULT_FEASIBILITY`:
+
+| category (weight) | sub-factor (weight) | utility curve (value → score) |
+|---|---|---|
+| **Power** (0.25), gate τ = 20, k = 2 | Sun visible now (0.35) | visible fraction of the solar disc 0 → 0, 1 → 100 |
+| | sunlight remaining (0.35) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
+| | annual illumination (0.30) | mean visible-disc fraction over 2026: 0 → 0, 0.3 → 40, 0.6 → 80, 0.9 → 100 |
+| **Earth connectivity** (0.25), gate τ = 20, k = 2 | Earth visible now (0.30) | 0 → 0, 1 → 100 |
+| | link margin above the terrain (0.20) | 0° → 0, 2° → 60, 10° → 100 |
+| | Earth contact remaining (0.25) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
+| | annual Earth visibility (0.25) | fraction of 2026: 0 → 0, 0.5 → 70, 1 → 100 |
+| **Landing** (0.50), gate τ = 40, k = 2 | slope (0.60) | 0–5° → 100, 10° → 50, 15° → 0, **> 15° knockout** |
+| | surface temperature (0.30) | 40 K → 10, 100 K → 70, 130–360 K → 100, 420 K → 30 |
+| | elevation, as local prominence (0.10) | height above the mean of a 3 km ring: −500 m → 40, 0 → 80, +300 m → 100 |
+
+With p = −2, any sub-score near 0 dominates its category no matter how small its weight. That's
+why the non-critical curves (temperature and prominence) keep a non-zero floor. The method
+reproduces the worked example: categories of 27 / 56 / 70 with weights 0.25 / 0.25 / 0.5 give
+56 (p = 1), 52 (geometric), 44 (p = −2) and 27 (minimum).
+
+**API.** Every `query()` returns `feasibility` with the final score, the category scores, the
+sub-scores, the raw inputs, the gate and any knockouts.
+
+**Overlay.** The static inputs are precomputed per grid point by
+[feasibility_grid.py](pipeline/feasibility_grid.py) (`make feasibility`). Those are height,
+slope, prominence, a 64-azimuth terrain horizon, and the 2026 sun, Earth and absorbed-flux
+statistics. They're stored as a separate quadtree of score tiles (`tiles/f/`, format `MLF1`):
+- levels 0–3 cover the whole Moon at 64 × 64 samples per tile, about 5.3 km apart at level 3;
+- levels 4–6 cover |latitude| ≥ 84° at about 670 m spacing.
+
+When the overlay is on, Web Workers evaluate the time-dependent part for the selected date and
+time, then call the same `feasibility()` function. That part is the Sun and Earth now, hours of
+sunlight and Earth contact remaining (3-hour steps), and temperature. The score is uploaded as a
+small texture per tile, and the terrain shader turns it into the colour ramp. Changing the date
+re-evaluates the visible tiles, on-screen ones first, and keeps the previous colours until new
+ones arrive.
+
+**Where the overlay differs from the API at the same point:**
+- **Horizon resolution:** 64 azimuths instead of 360.
+- **Terrain detail:** the overlay uses height tiles up to level 6 (167 m) globally and level 9
+  (20 m) near the poles, while the API uses everything down to 5 m. Slopes therefore differ
+  where the terrain is rough at small scales.
+- **Temperature:** the overlay uses a fast proxy, not the API's 1-D model. When sunlit it's the
+  instantaneous radiative equilibrium; in shadow it's exponential cooling from 0.6 × T_deep
+  toward 0.4 × T_deep, where T_deep comes from the point's annual mean absorbed flux.
+
+FEAS_NUMBERS_PLACEHOLDER
 
 ## Repository layout and size
 

@@ -7,7 +7,7 @@ endif
 MAX_LEVEL ?= 11
 WORKERS ?= 24
 
-.PHONY: all venv download pack unpack inspect basisu tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
+.PHONY: all venv download pack unpack inspect basisu feasibility tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
 
 all: tiles build
 
@@ -50,6 +50,10 @@ tiles: heights colour stars meta stats ephem earth
 # Sun/Earth state vectors seen from the Moon, 2000-2050, from the JPL Horizons API
 ephem:
 	$(PY) -I pipeline/ephemeris.py --start 2000 --end 2050 --validate
+
+# static inputs of the feasibility overlay (horizons, slope, annual stats) -> tiles/f/
+feasibility:
+	$(PY) -I pipeline/feasibility_grid.py --workers $(WORKERS)
 
 # Earth texture for the sky (NASA Blue Marble, SVS 2915) -> web/public/sky/earth.jpg
 earth:

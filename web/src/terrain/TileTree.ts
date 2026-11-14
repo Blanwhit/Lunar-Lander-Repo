@@ -231,6 +231,8 @@ export class TileTree {
   private sphere = new Sphere();
   gpuBytes = 0;
   private baseReady = false;
+  /** optional feasibility overlay lookup (null = overlay off / not available) */
+  feasProvider: ((L: number, f: number, x: number, y: number) => { tex: Texture; scale: number; ou: number; ov: number } | null) | null = null;
   bytesDownloaded = 0;
   drawn: TileNode[] = [];
   onChange: () => void = () => {};
@@ -593,6 +595,10 @@ export class TileTree {
           uExposure: { value: 1 },
           uEarthDir: { value: new Vector3(1, 0, 0) },
           uEarthshine: { value: 0 },
+          uFeas: { value: this.fallbackColour },
+          uFeasXf: { value: new Vector3(1, 0, 0) },
+          uFeasOn: { value: 0 },
+          uFeasN: { value: 64 },
         },
       });
       n.mesh = new Mesh(tileGeometry(), mat);
@@ -623,6 +629,12 @@ export class TileTree {
     u.uExposure.value = lightParams.exposure;
     (u.uEarthDir.value as Vector3).copy(lightParams.earthDir);
     u.uEarthshine.value = lightParams.earthshine;
+    const fz = this.feasProvider ? this.feasProvider(n.level, n.face, n.x, n.y) : null;
+    u.uFeasOn.value = fz ? 1 : 0;
+    if (fz) {
+      u.uFeas.value = fz.tex;
+      (u.uFeasXf.value as Vector3).set(fz.scale, fz.ou, fz.ov);
+    }
     const dist = Math.hypot(n.centre[0] - fi.camPos[0], n.centre[1] - fi.camPos[1], n.centre[2] - fi.camPos[2]);
     n.mesh.renderOrder = 10 + Math.min(1e6, dist / 10); // front to back
     void this.tmpV;
