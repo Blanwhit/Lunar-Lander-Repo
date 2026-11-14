@@ -438,6 +438,13 @@ def cmd_meta(args) -> None:
         "radius": geom.R_MOON,
         "stars": stars,
     }
+    # keep the entry pipeline/feasibility_grid.py added (it takes hours to recompute) as long
+    # as its score tiles are still there
+    old = OUT / "meta.json"
+    if old.exists() and (OUT / "f").is_dir():
+        feas = json.loads(old.read_text()).get("feasibility")
+        if feas:
+            meta["feasibility"] = feas
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "meta.json").write_text(json.dumps(meta, indent=1))
     print(json.dumps(meta))

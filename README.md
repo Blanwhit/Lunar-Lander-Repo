@@ -19,7 +19,11 @@ bar along the bottom:
   [Feasibility score](#feasibility-score)).
 * **Compass** (bottom-right, Google-Earth style): the red needle points to lunar north on
   screen; click it to turn the view back to north-up (position, zoom and tilt are kept).
-* **Drag**: orbit (inertia). **Right-drag / Shift-drag / two-finger twist**: heading and tilt.
+* **Drag**: orbit (inertia). **Shift-drag / Ctrl-drag / two-finger twist**: heading and tilt.
+* **Right-click** a spot: the view pans it to the centre and a popup shows its coordinates and
+  colour-coded feasibility score. **More info** (or F3 while a spot is selected) opens a panel
+  with the full site report: Sun, Earth and landing factors with the power, connectivity and
+  landing scores. Escape closes both.
 * **Wheel / pinch**: zoom, from the whole Moon down to just above the surface. The view tilts
   towards the horizon automatically near the ground.
 * Point analysis (Earth link, power, temperature, slope, Earthrise/-set): see the
@@ -28,39 +32,129 @@ bar along the bottom:
   Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
   `#2,84,40000,270,82,2026-01-10T12:00Z`.
 
-## Run
+## Build and run
 
-Prerequisites: Python 3.11+, Node 18/20/22+ (Vite 6), and g++ (MinGW is fine on
-Windows) to build the texture encoder.
+### Just run the viewer
 
-**Just run the viewer.** This needs the tile pyramid in `web/public/tiles/`, which isn't in git
-(see [Repository layout and size](#repository-layout-and-size)).
-
-```bash
-cd web && npm install && npm run dev        # http://localhost:5173
-```
-
-**Build everything from the NASA data:**
+If `web/public/tiles/` is already there (copied from another machine or a release archive; it
+isn't in git, see [Repository layout and size](#repository-layout-and-size)):
 
 ```bash
-make venv          # Python venv: GDAL (rasterio), numpy, scipy, OpenEXR, zstandard, ...
-make download      # ~11 GB of raw NASA data into data/raw (sizes printed first; refuses >5 GB/file)
-make basisu        # builds the Basis Universal encoder (tools/basisu) from source with g++
-make tiles         # overviews -> heights -> colour KTX2 -> stars -> meta -> stats -> ephem -> earth (~50 min)
-make pack          # optional: losslessly pack data/raw (10.9 GB -> 5.1 GB)
-make build         # vite build -> web/dist (static site; copies web/public incl. tiles, ~3.2 GB)
-make serve         # vite preview of web/dist on :4173
+cd web
+npm install
+npm run dev        # http://localhost:5173
 ```
 
-* If `data/raw` has been packed, run `make unpack` before rebuilding tiles. It restores the
-  original files bit-exact.
-* `make tiles` also refreshes the Sun/Earth ephemeris from JPL Horizons (`make ephem`, which
-  needs network access) and the Earth texture (`make earth`). Both are already committed, so the
-  viewer works without them.
-* Without `make` (e.g. plain Windows), run the commands from the [Makefile](Makefile) directly,
-  for example `.venv/Scripts/python -I pipeline/build.py heights --max-level 11`. `MAX_LEVEL` caps
-  the quadtree depth. Each level beyond L6 is generated only where a source DEM is fine enough to
-  justify it.
+Without the tiles the page stays black. Everything below builds them from the NASA data.
+
+### Build everything from scratch
+
+#### 1. Prerequisites
+
+| what | version | used for |
+|---|---|---|
+| Python | 3.11+ (built with 3.12) | the data pipeline (`pipeline/`) |
+| Node.js + npm | 18, 20 or 22+ (Vite 6; built with 22.1) | the viewer (`web/`) |
+| gcc / g++ and `sh` | any recent; on Windows MSYS2 MinGW-w64 + Git Bash | compiling the Basis Universal texture encoder once |
+| GNU make | optional | shortcuts; every target is a one-liner, see [Without make](#without-make-windows) |
+| disk | ~25 GB free at the peak | 11 GB raw data + up to 7 GB cache + 3.2 GB tiles + 3.2 GB `web/dist` |
+| network | | NASA PDS / MIT / SVS servers (raw data), GitHub (encoder sources), JPL Horizons API (ephemeris) |
+
+Run everything from the repository root. On macOS/Linux the venv Python is `.venv/bin/python`
+instead of `.venv/Scripts/python` (the Makefile picks the right one).
+
+#### 2. Steps
+
+| # | command | what it does | output | time (32 threads) |
+|---|---|---|---|---|
+| 1 | `make venv` | creates `.venv` and installs [requirements.txt](pipeline/requirements.txt) (numpy, scipy, rasterio/GDAL, OpenEXR, opencv, zstandard, ...) | `.venv/` | a few min |
+| 2 | `make web` | `npm install` in `web/` | `web/node_modules/` | ~1 min |
+| 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star layers, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
+| 4 | `make basisu` | fetches Basis Universal v1_50_0_2 from GitHub and compiles it with g++ | `tools/basisu(.exe)` | a few min |
+| 5 | `make tiles` | overviews → heights → colour → stars → meta → stats → ephem → earth (see below) | `web/public/tiles/` (3.2 GB), `web/public/ephem/`, `web/public/sky/earth.jpg` | ~50 min |
+| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | 2–3 h |
+| 7 | `make build` | type-check + `vite build`; copies `web/public` including the tiles | `web/dist/` (~3.2 GB static site) | ~1 min |
+| 8 | `make serve` | serves `web/dist` | http://localhost:4173 | |
+| | `make pack` | optional: losslessly packs `data/raw` (10.9 → 5.1 GB, SHA-256 verified); `make unpack` restores it bit-exact | `data/raw_packed/` | |
+
+`make tiles` runs these pipeline steps, each also available on its own:
+
+| target | step | needs |
+|---|---|---|
+| `overviews` | cached 2×2-mean pyramids of every source DEM | the DEMs in `data/raw` |
+| `heights` | cube-sphere height tiles L0–L11 (`MAX_LEVEL`, default 11) with `WORKERS` processes (default 24) | `overviews` |
+| `colour` | KTX2 colour tiles L0–L5 | `data/raw/lroc_color.exr`, `tools/basisu` |
+| `stars` | star cubemaps (512² and 2048²) from the stars and Milky Way layers | the two `*_2020_*.exr` files, `tools/basisu` |
+| `meta` | writes `tiles/meta.json` (levels, star files) | the steps above |
+| `stats` | prints the table in [Tile pyramid](#tile-pyramid-output-of-make-stats) | `heights`, `colour` |
+| `ephem` | Sun/Earth state vectors 2000–2050 from the JPL Horizons API, validated against Horizons' sub-solar and sub-Earth points | network |
+| `earth` | Earth texture with baked-in clouds | the Earth images (downloads them if missing) |
+
+`ephem` and `earth` refresh files that are already committed, so a build that only needs the
+tiles can leave them out by running the other targets directly.
+
+#### Without make (Windows)
+
+The same steps as plain commands (Git Bash, from the repository root):
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -r pipeline/requirements.txt
+(cd web && npm install)
+.venv/Scripts/python -I pipeline/download.py --workers 16
+sh pipeline/build_basisu.sh                      # needs MinGW g++ on PATH
+.venv/Scripts/python -I pipeline/build.py overviews
+.venv/Scripts/python -I pipeline/build.py heights --max-level 11 --workers 24
+.venv/Scripts/python -I pipeline/build.py colour
+.venv/Scripts/python -I pipeline/build.py stars
+.venv/Scripts/python -I pipeline/build.py meta
+.venv/Scripts/python -I pipeline/build.py stats
+.venv/Scripts/python -I pipeline/ephemeris.py --start 2000 --end 2050 --validate
+.venv/Scripts/python -I pipeline/build.py earth
+.venv/Scripts/python -I pipeline/feasibility_grid.py --workers 24
+(cd web && npm run build && npm run preview)     # http://localhost:4173
+```
+
+#### Check the result
+
+`web/public/tiles/meta.json` should end up like this (the `feasibility` block appears only after
+step 6):
+
+```json
+{
+ "format": "MLH1",
+ "maxLevel": 11,
+ "colourMaxLevel": 5,
+ "tileN": 256,
+ "grid": 259,
+ "radius": 1737400.0,
+ "stars": ["stars_512.ktx2", "stars_2048.ktx2"],
+ "feasibility": {"format": "MLF1", "samples": 64, "azimuths": 64, "maxLevel": 6,
+                 "globalLevel": 3, "polarLat": 84.0, "referenceYear": 2026}
+}
+```
+
+With the default settings `make stats` reports the numbers in
+[Tile pyramid](#tile-pyramid-output-of-make-stats). The viewer's Feasibility Overlay switch only
+does something when the `feasibility` block is present.
+
+#### Order and re-runs
+
+* **Feasibility comes last.** It reads the finished height tiles and the 2026 ephemeris, then adds
+  its entry to `meta.json`. Re-running `make meta` (or `make tiles`) later keeps that entry as long
+  as `tiles/f/` exists, so the 2–3 h step never has to be repeated just to restore it. Rerun
+  `make feasibility` only when its inputs change: new height tiles (another `MAX_LEVEL`, other
+  DEM sources or settings) or different feasibility options. Deleting `tiles/f/` and running
+  `make meta` removes the entry.
+* **Packed raw data.** If `data/raw` has been packed (`make pack`), run `make unpack` before
+  rebuilding any tiles. The pipeline reads the original files.
+* **Smaller or faster builds.** `make heights MAX_LEVEL=9` stops the quadtree earlier (about 20 m
+  instead of 5 m at the south pole; each level beyond L6 is built only where a source DEM is fine
+  enough). `WORKERS=8` uses fewer processes on smaller machines, at the cost of time.
+* **Rebuilding one part.** Each target runs on its own once its inputs exist, e.g. `make stars meta`
+  after changing the star settings in [config.json](pipeline/config.json).
+* **Starting over.** `make clean-tiles` deletes `web/public/tiles/`. `data/cache/` can be deleted
+  as well; `overviews` and `colour` rebuild it.
 
 ## Site API (`web/src/api/`)
 
@@ -228,7 +322,8 @@ after lossless compaction:
 | `.venv/`, `web/node_modules/`, `tools/` | 0.57 GB | no | environments and the compiled encoder (`make venv`, `npm install`, `make basisu`) |
 
 * **What a clone contains.** A plain `git clone` has the code, the ephemeris and the Earth
-  texture, but not the tiles. Either rebuild them (`make download tiles`) or copy
+  texture, but not the tiles. Either rebuild them (see
+  [Build everything from scratch](#build-everything-from-scratch)) or copy
   `web/public/tiles/` across separately. On GitHub, the code and tiles together are about
   3.2 GB. Every tile is under 75 KB (the largest file is the 4.4 MB star cubemap), but GitHub
   caps a single push at 2 GB, so committing
