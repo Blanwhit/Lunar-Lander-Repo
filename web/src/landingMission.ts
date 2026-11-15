@@ -20,6 +20,19 @@ export function preloadMission() {
 }
 
 const contactStep=1/120;
+/** rigid points that stop the engine at once if they touch: footpads and the descent-engine bell */
+const solidContacts=[
+  [padRadius,0,0],[-padRadius,0,0],[0,0,padRadius],[0,0,-padRadius],[0,.38,0],
+].map(([x,y,z])=>new Vector3(x,y,z));
+/** crew response after the contact light: the Apollo 11 press kit's nominal second */
+const CONTACT_RESPONSE_S=1;
+/** a surface-sensing probe of the model: a "Folded" morph between its extended and folded tips */
+interface SensingProbe {
+  weights: number[];
+  foldedIndex: number;
+  extended: Vector3;
+  folded: Vector3;
+}
 const G_MOON=1.62;
 // Descent: FREE_FALL_S of free fall from V0 (engine off), then the descent engine brakes the
 // lander over BRAKE_S, easing to TOUCHDOWN_SPEED as it reaches the ground (velocity follows
@@ -67,7 +80,10 @@ export class LandingMission {
   private off=false;
   private touchdownAt=-1;
   private phase='Final descent';
-  private probe=new Vector3();
+  private worldPoint=new Vector3();
+  private probeTip=new Vector3();
+  private probes:SensingProbe[]=[];
+  private firstProbeContact?:number;
   private bearing=0;
   private glideFrom={bearing:0,radius:0,height:0,rotation:new Quaternion()};
   private glideTo={eye:new Vector3(),rotation:new Quaternion()};
@@ -77,14 +93,25 @@ export class LandingMission {
   constructor(assets:Group[],private sun:Vector3,private floor:(x:number,z:number)=>number,
     private surface:(x:number,z:number)=>number) {
     this.lander=assets[0].clone(true);
+    this.lander.updateMatrixWorld(true);
     this.environment=this.reflections();
     this.lander.traverse(node=>{
-      if(!(node instanceof Mesh) || !(node.material instanceof MeshStandardMaterial))return;
+      if(!(node instanceof Mesh))return;
+      node.castShadow=node.receiveShadow=true;
+      // the model's surface-sensing probes fold through a "Folded" morph target
+      const index=node.morphTargetDictionary?.Folded;
+      if(index!==undefined && node.morphTargetInfluences && node.userData.extendedTip && node.userData.foldedTip){
+        this.probes.push({
+          weights:node.morphTargetInfluences,foldedIndex:index,
+          extended:new Vector3().fromArray(node.userData.extendedTip).applyMatrix4(node.matrixWorld),
+          folded:new Vector3().fromArray(node.userData.foldedTip).applyMatrix4(node.matrixWorld),
+        });
+      }
+      if(!(node.material instanceof MeshStandardMaterial))return;
       const source=node.material;
       let surface=this.surfaces.get(source);
       if(!surface){surface=source.clone();surface.envMap=this.environment;this.surfaces.set(source,surface);}
       node.material=surface;
-      node.castShadow=true;node.receiveShadow=true;
     });
     // Descent-engine exhaust: a faint flickering cone below the bell (additive, so it reads
     // as a glow over the ground and vanishes when the engine stops).
@@ -132,6 +159,8 @@ export class LandingMission {
     this.destination.set(x,this.floor(x,z),z);
     this.bed=new LandingBed(this.surface);this.dynamics=new LanderDynamics(this.bed);
     this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dustFade=1;this.touchdownAt=-1;this.throttle=0;
+    this.firstProbeContact=undefined;
+    for(const probe of this.probes)probe.weights[probe.foldedIndex]=0;
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
     // orbit so that the glide starts from GLIDE_BEARING if touchdown comes on schedule
     this.bearing=GLIDE_BEARING-ORBIT_RATE*(DESCENT_S+HOLD_S);
@@ -176,7 +205,7 @@ export class LandingMission {
       this.lander.position.set(p.x,p.y+h,p.z);
       this.lander.quaternion.identity();
       this.height=this.lander.position.y-this.floor(p.x,p.z);
-      if(this.probeContact() || t>=DESCENT_S){
+      if(this.shouldCutOff() || t>=DESCENT_S){
         this.off=true;freeDt=0;const body=this.dynamics;
         body.rotation.copy(this.lander.quaternion);
         body.position.set(0,centreHeight,0).applyQuaternion(body.rotation).add(this.lander.position);
@@ -189,6 +218,7 @@ export class LandingMission {
       while(this.accumulator>=contactStep){body.step(contactStep);this.accumulator-=contactStep;}
       this.lander.quaternion.copy(body.rotation);
       this.lander.position.set(0,-centreHeight,0).applyQuaternion(body.rotation).add(body.position);
+      if(!body.settled)this.foldProbes();
       this.speed=body.velocity.length();this.height=Math.max(0,this.lander.position.y-this.floor(this.lander.position.x,this.lander.position.z));
       if(this.touchdownAt<0 && this.landed)this.touchdownAt=this.time;
     }
@@ -203,18 +233,40 @@ export class LandingMission {
     this.plume.material.uniforms.clock.value=this.time;
     this.plume.scale.set(1,.85+.15*Math.sin(this.time*37),1);
     this.phase=this.off?(this.dynamics.tilt>Math.PI/4?'Lander tipped':this.dynamics.settled?'At rest':this.landed?'Touchdown':'Engine cutoff')
-      :this.time<FREE_FALL_S?'Free fall':this.time<FREE_FALL_S+IGNITION_S+.4?'Engine start':'Final descent';
+      :this.time<FREE_FALL_S?'Free fall':this.time<FREE_FALL_S+IGNITION_S+.4?'Engine start'
+      :this.firstProbeContact!==undefined?'Contact light':'Final descent';
     this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
     this.updateDust(dt);
     this.frameCamera(dt,astronautEye,astronautRotation);
   }
-  private probeContact(){
-    // The forward (ladder) pad has no probe. A ridge under the nozzle can strike first.
-    for(const [x,y,z] of [[padRadius,-.6,0],[-padRadius,-.6,0],[0,-.6,padRadius],[0,0,-padRadius],[0,.38,0]]){
-      const point=this.probe.set(x,y,z).applyQuaternion(this.lander.quaternion).add(this.lander.position);
-      if(point.y<=this.bed.at(point.x,point.z))return true;
+  /** height of a lander-local point above the soil under it */
+  private clearance(local:Vector3){
+    const p=this.worldPoint.copy(local).applyQuaternion(this.lander.quaternion).add(this.lander.position);
+    return p.y-this.bed.at(p.x,p.z);
+  }
+  /** fold each probe that reaches the soil just enough to rest on it (they stay bent) */
+  private foldProbes(){
+    for(const probe of this.probes){
+      let low=probe.weights[probe.foldedIndex], high=1;
+      if(low>=1)continue;
+      const tip=this.probeTip.lerpVectors(probe.extended,probe.folded,low);
+      if(this.clearance(tip)>0)continue;
+      this.firstProbeContact??=this.time;
+      if(this.clearance(probe.folded)>0){
+        for(let i=0;i<8;i++){
+          const mid=(low+high)/2;
+          if(this.clearance(this.probeTip.lerpVectors(probe.extended,probe.folded,mid))<0)low=mid;
+          else high=mid;
+        }
+      }
+      probe.weights[probe.foldedIndex]=high;
     }
-    return false;
+  }
+  /** engine cutoff: a second after the first probe touches, or at once if pads or bell touch */
+  private shouldCutOff(){
+    this.foldProbes();
+    if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=CONTACT_RESPONSE_S)return true;
+    return solidContacts.some(local=>this.clearance(local)<=0);
   }
   private updateDust(dt:number){
     if(this.off)this.dustFade=Math.max(0,this.dustFade-dt*1.8);
