@@ -165,6 +165,7 @@ export interface SiteApi {
 export interface SiteApiOptions {
   /** base URL of the static site (the folder containing tiles/ and ephem/) */
   baseUrl: string;
+  terrainUrl?: string;
   fetch?: typeof fetch;
   orientation?: OrientationProvider;
   temperatureModel?: TemperatureModel;
@@ -245,7 +246,7 @@ function localFrame(lat: number, lon: number): Frame {
 export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const base = opts.baseUrl.endsWith('/') ? opts.baseUrl : opts.baseUrl + '/';
   const fetchImpl = opts.fetch ?? fetch.bind(globalThis);
-  const terrain = new TileTerrain(base + 'tiles/', fetchImpl);
+  const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl);
   const ephem = new Ephemeris(base + 'ephem/', fetchImpl);
   const orientation = opts.orientation ?? moonOrientation;
   const thermal = opts.temperatureModel ?? thermophysicalModel;

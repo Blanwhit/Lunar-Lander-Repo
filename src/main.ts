@@ -63,15 +63,21 @@ async function main() {
   renderer.sortObjects = true;
 
   const base = import.meta.env.BASE_URL + 'tiles/';
-  const meta: TileMeta = await fetch(base + 'meta.json').then((r) => r.json());
+  const [meta, coverage] = await Promise.all([
+    fetch(base + 'meta.json').then(r => r.json() as Promise<TileMeta>),
+    fetch(import.meta.env.BASE_URL + 'orbital/status.json', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+  const fullCoverage = Number.isInteger(coverage?.maxLevel) && Number.isInteger(coverage?.colourMaxLevel);
+  const terrainUrl = fullCoverage ? import.meta.env.BASE_URL + 'orbital/' : base;
 
   const ktx2 = new KTX2Loader().setTranscoderPath(import.meta.env.BASE_URL + 'basis/').detectSupport(renderer);
 
   const tree = new TileTree(
     {
-      baseUrl: base,
-      colourMaxLevel: meta.colourMaxLevel,
-      maxLevel: meta.maxLevel,
+      baseUrl: terrainUrl,
+      colourMaxLevel: fullCoverage ? coverage.colourMaxLevel : meta.colourMaxLevel,
+      maxLevel: fullCoverage ? coverage.maxLevel : meta.maxLevel,
       pixelsPerTexel: 1.25,
       gpuBudgetBytes: 384 * 1024 * 1024,
       maxInflightHeights: 12,
@@ -563,7 +569,7 @@ async function main() {
   // site API (lazy-loaded): (await __moon.siteApi()).query({ lat, lon, time })
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
-    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL })));
+    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl })));
 
   // fps counter (only counts rendered frames; readable via window.__moon.perf)
   setInterval(() => {
