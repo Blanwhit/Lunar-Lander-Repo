@@ -1,6 +1,6 @@
 import {
   AmbientLight, DirectionalLight, DynamicDrawUsage, Group, InstancedMesh, MathUtils, Matrix4,
-  Matrix3, Object3D, PlaneGeometry, Quaternion, ShaderMaterial, Vector3,
+  Matrix3, Object3D, PlaneGeometry, Quaternion, ShaderMaterial, Sphere, Vector3,
 } from 'three';
 import { BoulderField, boulderBands, hash, type RockAtlas } from '../boulderField';
 import { FACES, GRID, MESH_N, R_MOON, TILE_N } from '../geom';
@@ -34,10 +34,36 @@ function groundPlane(tile: TileNode, col: number, row: number, upper: boolean, l
   return { normal, distance: normal.dot(p) };
 }
 
+// Enclose a block of scatter cells on the rendered DEM. The corner heights bound
+// both triangles of every overlapping quad, including blocks that cross a ridge.
+const cellsPerBlock = 4;
+function blockBounds(tile: TileNode, left: number, bottom: number, step: number,
+  blockX: number, blockY: number, width: number) {
+  const x0 = Math.max(left, blockX * width), x1 = Math.min(left + step * MESH_N, (blockX + 1) * width);
+  const y0 = Math.max(bottom, blockY * width), y1 = Math.min(bottom + step * MESH_N, (blockY + 1) * width);
+  const stride = TILE_N / MESH_N;
+  let low = Infinity, high = -Infinity;
+  for (let j = MathUtils.clamp(Math.floor((y0-bottom)/step), 0, MESH_N); j <= Math.min(MESH_N, Math.ceil((y1-bottom)/step)); j++) {
+    for (let i = MathUtils.clamp(Math.floor((x0-left)/step), 0, MESH_N); i <= Math.min(MESH_N, Math.ceil((x1-left)/step)); i++) {
+      const h = tile.q![(j * stride + 1) * GRID + i * stride + 1];
+      low = Math.min(low, h);
+      high = Math.max(high, h);
+    }
+  }
+  // tan's derivative is at most 2 across a cube face. Normalizing the face
+  // vector cannot stretch it. Also allow for the chord sag of a flat DEM triangle.
+  const maxRadius = R_MOON + tile.base + high * tile.step;
+  const angle = Math.min(Math.PI, 2 * Math.SQRT2 * step / R_MOON);
+  const minRadius = (R_MOON + tile.base + low * tile.step) * Math.cos(angle);
+  const center = direction(tile.face, (x0+x1)/2, (y0+y1)/2, new Vector3()).multiplyScalar((minRadius+maxRadius)/2);
+  return new Sphere(center, (maxRadius-minRadius)/2 + Math.hypot(x1-x0, y1-y0) * maxRadius/R_MOON + .01);
+}
+
 export class OrbitalRocks {
   readonly group = new Group();
   private readonly fields: BoulderField[];
   private readonly batches: InstancedMesh[][];
+  private readonly bounds = new WeakMap<NonNullable<TileNode['q']>, Map<string, Sphere>>();
   private readonly shadow: InstancedMesh;
   private readonly sun = new DirectionalLight(0xffffff);
   private readonly earth = new DirectionalLight(0xc6d6ff);
@@ -121,6 +147,8 @@ export class OrbitalRocks {
     for (const levels of this.batches) for (const mesh of levels) mesh.count = 0;
     this.shadow.count = 0;
 
+    const slopeY = Math.tan(fi.fovY / 2) * 1.18, slopeX = slopeY * aspect;
+    const planeX = Math.hypot(1, slopeX), planeY = Math.hypot(1, slopeY);
     for (const tile of tiles) {
       const face = axes[tile.face], dn = face.n.dot(radial);
       if (dn < 0.55 || !tile.q) continue;
@@ -128,6 +156,8 @@ export class OrbitalRocks {
       const cy = R_MOON * Math.atan2(face.v.dot(radial), dn);
       const span = 2 * halfFace / tile.n, left = tile.x * span - halfFace, bottom = tile.y * span - halfFace;
       const step = span / MESH_N;
+      let bounds = this.bounds.get(tile.q);
+      if (!bounds) this.bounds.set(tile.q, bounds = new Map());
       const planes = new Map<number, ReturnType<typeof groundPlane>>();
       for (const [layer, band] of boulderBands.entries()) {
         const range = Math.min(6000, P * band.max / 1.25, band.radius * 3);
@@ -138,57 +168,89 @@ export class OrbitalRocks {
         const maxX = Math.floor(Math.min(left + span, cx + reach) / width);
         const minY = Math.floor(Math.max(bottom, cy - reach) / width);
         const maxY = Math.floor(Math.min(bottom + span, cy + reach) / width);
-        for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
-          for (const rock of this.fields[tile.face].tile(layer, x, y)) {
-            const u = (rock.x - left) / step, v = (rock.z - bottom) / step;
-            if (u < 0 || v < 0 || u >= MESH_N || v >= MESH_N) continue;
-            direction(tile.face, rock.x, rock.z, dir);
-            const col = Math.floor(u), row = Math.floor(v), upper = v - row > u - col;
-            const key = 2 * (row * MESH_N + col) + Number(upper);
-            let plane = planes.get(key);
-            if (!plane) {
-              plane = groundPlane(tile, col, row, upper, left, bottom, step);
-              planes.set(key, plane);
+        if (minX > maxX || minY > maxY) continue;
+        const blockSize = width * cellsPerBlock;
+        for (let by = Math.floor(minY / cellsPerBlock); by <= Math.floor(maxY / cellsPerBlock); by++) {
+          const columns: number[] = [];
+          for (let bx = Math.floor(minX / cellsPerBlock); bx <= Math.floor(maxX / cellsPerBlock); bx++) {
+            const key = layer + '/' + bx + '/' + by;
+            let block = bounds.get(key);
+            if (!block) {
+              block = blockBounds(tile, left, bottom, step, bx, by, blockSize);
+              if (bounds.size >= 4096) bounds.delete(bounds.keys().next().value!);
+              bounds.set(key, block);
             }
-            pos.copy(dir).multiplyScalar(plane.distance / plane.normal.dot(dir)).sub(cam);
-            const dist = pos.length(), pixels = P * rock.diameter / Math.max(1, dist);
-            if (pixels <= 1.25 || dist >= range) continue;
-            view.copy(pos).applyMatrix3(fi.viewRot);
-            const halfHeight = -view.z * Math.tan(fi.fovY / 2);
-            if (halfHeight < 0 || Math.abs(view.x) > halfHeight * aspect * 1.18 + rock.diameter || Math.abs(view.y) > halfHeight * 1.18 + rock.diameter) continue;
-            const variant = Math.floor(hash(rock.i, rock.j, 6) * this.batches.length);
-            const mesh = this.batches[variant][pixels > 42 ? 0 : pixels > 10 ? 1 : 2];
-            if (mesh.count >= capacity) continue;
-            const fade = (1 - MathUtils.smoothstep(dist, range * 0.8, range)) * MathUtils.smoothstep(pixels, 1.25, 3);
-            const radius = rock.diameter * 0.5 * fade;
-            const normal = plane.normal;
-            this.orient.setFromUnitVectors(axisY, normal);
-            this.stamp.rotation.set(hash(rock.i, rock.j, 8) * 0.45, hash(rock.i, rock.j, 9) * 2 * Math.PI, 0, 'YXZ');
-            this.stamp.quaternion.premultiply(this.orient);
-            this.stamp.position.copy(pos).addScaledVector(normal, radius * 0.07);
-            this.stamp.scale.set(radius, radius * (0.75 + 0.25 * hash(rock.i, rock.j, 10)), radius);
-            this.stamp.updateMatrix();
-            mesh.setMatrixAt(mesh.count++, this.stamp.matrix);
-            if (this.shadow.count >= this.shadow.instanceMatrix.count) continue;
-            const incidence = normal.dot(sun);
-            tangent.copy(sun).addScaledVector(normal, -incidence);
-            if (tangent.lengthSq() < 1e-8) tangent.copy(face.u).addScaledVector(normal, -face.u.dot(normal));
-            tangent.normalize().negate();
-            side.crossVectors(normal, tangent);
-            const length = incidence > 0 && this.sun.intensity > 0.1
-              ? Math.min(radius * 3.8, radius * 0.48 / Math.max(0.09, incidence)) : 0;
-            shadowMatrix.makeBasis(tangent.multiplyScalar(radius + length / 2), side.multiplyScalar(radius * 0.85), normal);
-            shadowMatrix.setPosition(pos.addScaledVector(tangent, length / (2 * radius + length)).addScaledVector(normal, 0.012));
-            this.shadow.setMatrixAt(this.shadow.count++, shadowMatrix);
+            view.subVectors(block.center, cam);
+            const r = block.radius;
+            if (view.lengthSq() > (range + r) ** 2) continue;
+            view.applyMatrix3(fi.viewRot);
+            if (view.z > r || Math.abs(view.x) + view.z * slopeX > planeX*r + band.max
+                || Math.abs(view.y) + view.z * slopeY > planeY*r + band.max) continue;
+            columns.push(bx);
+          }
+          // Preserve row-major scatter order, including when an instance batch fills.
+          for (let y = Math.max(minY, by*cellsPerBlock); y <= Math.min(maxY, (by+1)*cellsPerBlock-1); y++) {
+            for (const bx of columns) for (let x = Math.max(minX,bx*cellsPerBlock); x <= Math.min(maxX,(bx+1)*cellsPerBlock-1); x++) {
+              for (const rock of this.fields[tile.face].tile(layer, x, y)) {
+                const u = (rock.x - left) / step, v = (rock.z - bottom) / step;
+                if (u < 0 || v < 0 || u >= MESH_N || v >= MESH_N) continue;
+                direction(tile.face, rock.x, rock.z, dir);
+                const col = Math.floor(u), row = Math.floor(v), upper = v - row > u - col;
+                const key = 2 * (row * MESH_N + col) + Number(upper);
+                let plane = planes.get(key);
+                if (!plane) {
+                  plane = groundPlane(tile, col, row, upper, left, bottom, step);
+                  planes.set(key, plane);
+                }
+                pos.copy(dir).multiplyScalar(plane.distance / plane.normal.dot(dir)).sub(cam);
+                const dist = pos.length(), pixels = P * rock.diameter / Math.max(1, dist);
+                if (pixels <= 1.25 || dist >= range) continue;
+                view.copy(pos).applyMatrix3(fi.viewRot);
+                const halfHeight = -view.z * Math.tan(fi.fovY / 2);
+                if (halfHeight < 0 || Math.abs(view.x) > halfHeight * aspect * 1.18 + rock.diameter || Math.abs(view.y) > halfHeight * 1.18 + rock.diameter) continue;
+                const variant = Math.floor(hash(rock.i, rock.j, 6) * this.batches.length);
+                const mesh = this.batches[variant][pixels > 42 ? 0 : pixels > 10 ? 1 : 2];
+                if (mesh.count >= capacity) continue;
+                const fade = (1 - MathUtils.smoothstep(dist, range * 0.8, range)) * MathUtils.smoothstep(pixels, 1.25, 3);
+                const radius = rock.diameter * 0.5 * fade;
+                const normal = plane.normal;
+                this.orient.setFromUnitVectors(axisY, normal);
+                this.stamp.rotation.set(hash(rock.i, rock.j, 8) * 0.45, hash(rock.i, rock.j, 9) * 2 * Math.PI, 0, 'YXZ');
+                this.stamp.quaternion.premultiply(this.orient);
+                this.stamp.position.copy(pos).addScaledVector(normal, radius * 0.07);
+                this.stamp.scale.set(radius, radius * (0.75 + 0.25 * hash(rock.i, rock.j, 10)), radius);
+                this.stamp.updateMatrix();
+                mesh.setMatrixAt(mesh.count++, this.stamp.matrix);
+                if (this.shadow.count >= this.shadow.instanceMatrix.count) continue;
+                const incidence = normal.dot(sun);
+                tangent.copy(sun).addScaledVector(normal, -incidence);
+                if (tangent.lengthSq() < 1e-8) tangent.copy(face.u).addScaledVector(normal, -face.u.dot(normal));
+                tangent.normalize().negate();
+                side.crossVectors(normal, tangent);
+                const length = incidence > 0 && this.sun.intensity > 0.1
+                  ? Math.min(radius * 3.8, radius * 0.48 / Math.max(0.09, incidence)) : 0;
+                shadowMatrix.makeBasis(tangent.multiplyScalar(radius + length / 2), side.multiplyScalar(radius * 0.85), normal);
+                shadowMatrix.setPosition(pos.addScaledVector(tangent, length / (2 * radius + length)).addScaledVector(normal, 0.012));
+                this.shadow.setMatrixAt(this.shadow.count++, shadowMatrix);
+              }
+            }
           }
         }
       }
     }
     for (const levels of this.batches) for (const mesh of levels) {
       mesh.visible = mesh.count > 0;
-      if (mesh.visible) mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.visible) {
+        mesh.instanceMatrix.clearUpdateRanges();
+        mesh.instanceMatrix.addUpdateRange(0, mesh.count * 16);
+        mesh.instanceMatrix.needsUpdate = true;
+      }
     }
     this.shadow.visible = this.shadow.count > 0;
-    if (this.shadow.visible) this.shadow.instanceMatrix.needsUpdate = true;
+    if (this.shadow.visible) {
+      this.shadow.instanceMatrix.clearUpdateRanges();
+      this.shadow.instanceMatrix.addUpdateRange(0, this.shadow.count * 16);
+      this.shadow.instanceMatrix.needsUpdate = true;
+    }
   }
 }

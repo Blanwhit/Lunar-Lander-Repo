@@ -76,6 +76,8 @@ export class WristNavigator {
       c.fillStyle=color;c.font='500 '+size+'px system-ui, sans-serif';c.fillText(str,24,y,592);
     };
     line('NAVIGATION',47,30,'#c7daa0');
+    c.fillStyle='#c7daa0'; c.font='500 27px system-ui'; c.textAlign='right';
+    c.fillText('Y · Return to globe',616,47); c.textAlign='left';
     if (this.destination) {
       const r=waypointReading(terrain.coordinates(x,z),this.destination);
       const change=this.lastDistance-r.distance;

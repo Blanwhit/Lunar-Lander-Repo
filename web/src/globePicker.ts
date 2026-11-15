@@ -17,6 +17,25 @@ export async function pickLandingInVR(session: XRSession, latitude: number, long
   renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6));
   renderer.setSize(innerWidth, innerHeight, false);
   renderer.xr.enabled = true;
+  let handedOff = false;
+  try {
+    let reference: XRReferenceSpaceType = 'local-floor';
+    try { await session.requestReferenceSpace(reference); } catch { reference = 'local'; }
+    renderer.xr.setReferenceSpaceType(reference);
+    await renderer.xr.setSession(session);
+    handedOff = await showLandingGlobe(renderer, session, latitude, longitude,
+      (lat, lon) => land(lat, lon, { renderer, session, reference }));
+  } finally {
+    if (!handedOff) {
+      renderer.setAnimationLoop(null);
+      renderer.dispose();
+      renderer.forceContextLoss();
+    }
+  }
+}
+
+export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSession,
+  latitude: number, longitude: number, land: (lat: number, lon: number) => Promise<boolean | void>) {
   const scene = new Scene(), camera = new PerspectiveCamera(65, 1, .025, 10);
   const stand = new Group();
   scene.add(stand);
@@ -52,30 +71,23 @@ export async function pickLandingInVR(session: XRSession, latitude: number, long
     ctx.fillText(detail, 512, 112);
     text.needsUpdate = true;
   }
-  caption('Point with your left controller', 'Press X to land · Left stick rotates the Moon');
+  caption('Point with your left controller', 'Left stick rotates · X lands · Y returns from the surface');
 
-  let selected = false, handedOff = false;
+  let selected = false;
   function release() {
     moon.geometry.dispose(); moon.material.dispose(); map.dispose();
     dot.geometry.dispose(); dot.material.dispose();
     beam.geometry.dispose(); beam.material.dispose();
     label.geometry.dispose(); label.material.dispose(); text.dispose();
-    if (!handedOff) {
-      renderer.setAnimationLoop(null);
-      renderer.dispose();
-      renderer.forceContextLoss();
-    }
+
   }
   try {
-    let reference: XRReferenceSpaceType = 'local-floor';
-    try { await session.requestReferenceSpace(reference); } catch { reference = 'local'; }
-    renderer.xr.setReferenceSpaceType(reference);
-    await renderer.xr.setSession(session);
     const bounds = new Sphere(new Vector3(), radius);
     const ray = new Ray(), hit = new Vector3(), forward = new Vector3();
     let anchored = false, lastTime = 0, previousSource: XRInputSource | undefined, xHeld = false;
-    await new Promise<void>((resolve, reject) => {
-      const ended = () => { if (!selected) resolve(); };
+    return await new Promise<boolean>((resolve, reject) => {
+      let finished = false;
+      const ended = () => { finished = true; if (!selected) resolve(false); };
       session.addEventListener('end', ended, { once: true });
       renderer.setAnimationLoop((time, frame) => {
         const space = renderer.xr.getReferenceSpace();
@@ -134,10 +146,18 @@ export async function pickLandingInVR(session: XRSession, latitude: number, long
               caption('Preparing landing', Math.abs(lat).toFixed(3) + '° ' + (lat < 0 ? 'S' : 'N')
                 + '    ' + Math.abs(lon).toFixed(3) + '° ' + (lon < 0 ? 'W' : 'E'));
               beam.visible = false;
-              void land(lat, lon, { renderer, session, reference }).then(() => {
-                handedOff = true;
-                resolve();
-              }, reject).finally(() => session.removeEventListener('end', ended));
+              void land(lat, lon).then(result => {
+                if (result === false && !finished) {
+                  caption('Terrain could not load', 'Point at a landing spot and press X to try again');
+                  selected = false;
+                } else {
+                  session.removeEventListener('end', ended);
+                  resolve(result !== false);
+                }
+              }, error => {
+                session.removeEventListener('end', ended);
+                reject(error);
+              });
             }
           }
         }
