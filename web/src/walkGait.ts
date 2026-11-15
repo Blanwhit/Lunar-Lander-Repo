@@ -1,5 +1,11 @@
 export const lunarGravity = 1.62; // m/s²
 export const walkSpeed = 1.5, sprintSpeed = 4.2; // m/s on level ground
+/** half-width of the stance used for support under the boots (m) */
+export const stanceRadius = .08;
+/** a rock up to this high above the soil can simply be stepped onto (m) */
+const stepUp = .30;
+/** suited push-off speed (m/s): about 1.1 m of clearance in lunar gravity */
+const jumpSpeed = 1.9;
 
 /** Stick turning integrates angular velocity about the tracked head position. */
 export class WalkTurn {
@@ -56,7 +62,7 @@ export class WalkGait {
     const decay = Math.exp(-stiffness*dt);
     this.compressionRate = (this.compressionRate-stiffness*response*dt)*decay;
     this.compression = (this.compression+response*dt)*decay;
-    const support = (x: number, z: number) => ground.surfaceAt?.(x, z, .12) ?? ground.floorAt(x, z);
+    const support = (x: number, z: number) => ground.surfaceAt?.(x, z, stanceRadius) ?? ground.floorAt(x, z);
     const floor = support(body.x, body.z);
     const soil = ground.floorAt(body.x, body.z);
     const input = Math.hypot(east, south);
@@ -83,7 +89,7 @@ export class WalkGait {
           const push = Math.max(0, .9*input - along);
           this.vx += east/input * push; this.vz += south/input * push;
         }
-        this.vy = 1.45; // Chosen suited push-off speed in m/s.
+        this.vy = jumpSpeed;
         this.stanceTravel = 0;
       }
     }
@@ -91,10 +97,11 @@ export class WalkGait {
     const oldX = body.x, oldZ = body.z;
     const dx = this.vx * dt, dz = this.vz * dt;
     const flightY = this.altitude + this.vy*dt - .5*lunarGravity*dt*dt;
-    // A low lip can be stepped onto. Taller ledges must be cleared by the ballistic arc.
+    // Rock up to knee height above the soil can be stepped onto, and a rock top crossed where it
+    // slopes gently. Taller ledges must be cleared by the ballistic arc.
     const canMove = (x: number, z: number) => {
       const top = support(x, z), terrain = ground.floorAt(x, z);
-      if (top <= terrain + (this.airborne ? .001 : .12)) return true;
+      if (top <= terrain + (this.airborne ? .001 : stepUp)) return true;
       const reachable = this.airborne ? Math.max(this.altitude, flightY)
         : floor + .85 * Math.hypot(x-oldX, z-oldZ);
       return top <= reachable + .0001;

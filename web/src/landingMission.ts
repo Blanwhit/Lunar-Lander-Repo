@@ -24,6 +24,12 @@ const contactStep=1/120;
 const solidContacts=[
   [padRadius,0,0],[-padRadius,0,0],[0,0,padRadius],[0,0,-padRadius],[0,.38,0],
 ].map(([x,y,z])=>new Vector3(x,y,z));
+// Walking hitbox, in the lander's frame (origin at the footpad soles, +y up), with a margin
+// for the walker's reach so the camera never ends up inside the hull. The descent stage is a
+// solid octagonal block, each leg a sloping strut from the stage out to its footpad, and the
+// footpads low steps that can be stood on.
+const HULL_HALF=2.15, HULL_TOP=7, LEG_HALF=.3, LEG_IN=2.0, LEG_HIGH=2.6, LEG_LOW=.45;
+const PAD_R=.5, PAD_TOP=.22, REACH=.3;
 /** crew response after the contact light: the Apollo 11 press kit's nominal second */
 const CONTACT_RESPONSE_S=1;
 /** a surface-sensing probe of the model: a "Folded" morph between its extended and folded tips */
@@ -81,6 +87,8 @@ export class LandingMission {
   private touchdownAt=-1;
   private phase='Final descent';
   private worldPoint=new Vector3();
+  private hitLocal=new Vector3();
+  private hitInverse=new Quaternion();
   private probeTip=new Vector3();
   private probes:SensingProbe[]=[];
   private firstProbeContact?:number;
@@ -236,8 +244,27 @@ export class LandingMission {
       :this.time<FREE_FALL_S?'Free fall':this.time<FREE_FALL_S+IGNITION_S+.4?'Engine start'
       :this.firstProbeContact!==undefined?'Contact light':'Final descent';
     this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
+    this.hitInverse.copy(this.lander.quaternion).invert();
     this.updateDust(dt);
     this.frameCamera(dt,astronautEye,astronautRotation);
+  }
+  /**
+   * Top (walk-scene y) of the lander's walking hitbox over (x, z), or -Infinity off it. Feeds
+   * the gait's support, so the hull and legs act as walls and the footpads as steps.
+   */
+  obstacleTop(x:number,z:number){
+    if(!this.group.visible)return -Infinity;
+    const p=this.hitLocal.set(x-this.lander.position.x,0,z-this.lander.position.z).applyQuaternion(this.hitInverse);
+    const ax=Math.abs(p.x),az=Math.abs(p.z),base=this.lander.position.y;
+    // descent stage: an octagon (square with its corners cut)
+    const hull=HULL_HALF+REACH;
+    if(ax<=hull && az<=hull && ax+az<=hull*1.42)return base+HULL_TOP;
+    // the legs run along the four axes; the strut drops from the stage to just above the pad
+    const along=Math.max(ax,az),across=Math.min(ax,az),padIn=padRadius-PAD_R;
+    if(across<=LEG_HALF+REACH && along>=LEG_IN && along<=padIn)
+      return base+MathUtils.lerp(LEG_HIGH,LEG_LOW,(along-LEG_IN)/(padIn-LEG_IN));
+    if(Math.hypot(along-padRadius,across)<=PAD_R)return base+PAD_TOP;
+    return -Infinity;
   }
   /** height of a lander-local point above the soil under it */
   private clearance(local:Vector3){

@@ -22,7 +22,7 @@ import { WalkSuit } from './walkSuit';
 import { WalkFootprints } from './walkFootprints';
 import type { BootPose } from './walkFeet';
 import { WalkDust } from './walkDust';
-import { WalkGait, WalkTurn } from './walkGait';
+import { WalkGait, WalkTurn, stanceRadius } from './walkGait';
 import { skyFS } from './terrain/shaders';
 import { LandingMission, preloadMission, type MissionView } from './landingMission';
 import { SurfaceSunGlare } from './sunGlare';
@@ -70,13 +70,9 @@ const walkStyle = `
 .walk-scene button.walk-enter {background:#eceef0;color:#101113;border-color:#eceef0;}
 .walk-scene .walk-bar {width:max-content;max-width:calc(100% - 20px);grid-template-columns:max-content;padding:8px 10px;column-gap:10px;}
 .walk-scene .walk-help,.walk-scene .walk-status {grid-column:1 / -1;}
-.walk-scene .mission-instruments {position:absolute;top:max(14px,env(safe-area-inset-top));left:14px;max-width:calc(100% - 28px);border-radius:6px;background:#11161bdb;padding:7px 10px;pointer-events:none;}
-.walk-scene .mission-instruments:has(.mission-telemetry:empty),.walk-scene .mission-instruments:has(.mission-telemetry[hidden]) {display:none;}
 .walk-scene .walk-help[hidden],.walk-scene button[hidden] {display:none;}
 .walk-scene .walk-actions button {white-space:nowrap;}
 @media(max-width:710px){.walk-scene .walk-bar {grid-template-columns:1fr;width:max-content;}}
-.walk-scene .mission-telemetry[hidden] {display:none;}
-.walk-scene .mission-telemetry {font-variant-numeric:tabular-nums;color:#d2e2eb;}
 .walk-scene button:disabled {opacity:.55;cursor:default;}
 .walk-scene .walk-help,.walk-scene .walk-status {margin:0;color:#c7cacf;font-size:12px;}
 .walk-scene .walk-status:empty,.walk-scene .walk-bar[hidden] {display:none;}
@@ -312,9 +308,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const forward = bar.querySelector<HTMLButtonElement>('.walk-touch')!;
   const exit = bar.querySelector<HTMLButtonElement>('.walk-exit')!;
   const status = bar.querySelector<HTMLElement>('.walk-status')!;
-  const instruments=document.createElement('div');instruments.className='mission-instruments';
-  overlay.append(instruments);
-  const telemetry=document.createElement('p');telemetry.className='walk-help mission-telemetry';instruments.append(telemetry);
   const abort = new AbortController();
   const listener = { signal: abort.signal };
   const screenToggle = document.createElement('button');
@@ -353,12 +346,29 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let supportCheck = 0;
   let shadowX = Infinity, shadowZ = Infinity;
   let finalMissionShadow = false; // the lander's shadow has been drawn once more after it settled
+  // What the gait walks on: the ground and its rocks, plus the landed lander's hitbox.
+  const landerTop=(x:number,z:number)=>missionLocal?mission.obstacleTop(x,z):-Infinity;
+  const walkSupport = {
+    floorAt: (x:number,z:number) => ground.floorAt(x,z),
+    surfaceAt: (x:number,z:number,radius=0) => {
+      let top = Math.max(ground.surfaceAt(x,z,radius), landerTop(x,z));
+      if (radius>0) top = Math.max(top, landerTop(x-radius,z), landerTop(x+radius,z), landerTop(x,z-radius), landerTop(x,z+radius));
+      return top;
+    },
+  };
   const missionOrigin=new Vector3(),missionHead=new Vector3();
   let captureOrigin=true;
   // After the glide (desktop): look down at the suit, hold, look back up; controls wait for it.
   // lookIntro: seconds into that, -1 when not running.
   let lookIntro=-1;
   const LOOK_DOWN_S=1.1, LOOK_HOLD_S=.8, LOOK_UP_S=1.2, LOOK_DEPTH=1.58;
+  /** 0..1 how far the palms are raised lookIntro seconds in: up with the look down, held,
+   *  dropped quickly once the camera starts to pan back up */
+  function handsCurve(t:number):number {
+    if(t<LOOK_DOWN_S+LOOK_HOLD_S)return MathUtils.smootherstep(t,.15,LOOK_DOWN_S*.95);
+    const up=t-LOOK_DOWN_S-LOOK_HOLD_S;
+    return 1-MathUtils.smootherstep(up,0,.5);
+  }
   /** pitch offset (rad, negative = down) lookIntro seconds in, or null once it is over */
   function lookIntroOffset(t:number):number|null {
     if(t<LOOK_DOWN_S)return -LOOK_DEPTH*MathUtils.smootherstep(t,0,LOOK_DOWN_S);
@@ -473,7 +483,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         samples.rebase();
         prints.dispose();dust.dispose();ground.dispose();
         if(hit instanceof Vector3 && missionLocal){
-          setMissionView('Surface');missionLocal=false;mission.group.visible=false;telemetry.hidden=true;
+          setMissionView('Surface');missionLocal=false;mission.group.visible=false;
         }
         site=next;ground=newGround;prints=new WalkFootprints(ground,suit.outsoles);dust=new WalkDust(prints);
         if(prior){prints.restoreTrail(prior.trail);regions.splice(regions.indexOf(prior),1);}
@@ -494,7 +504,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         }
       }
       if(!(hit instanceof Vector3)){
-        missionLocal=true;telemetry.hidden=false;lookIntro=-1;mission.restart(x,z);setObserver(x,z);setMissionView('Outside');
+        missionLocal=true;lookIntro=-1;mission.restart(x,z);setObserver(x,z);setMissionView('Outside');
       }else {targetX=x;targetZ=z;}
       trackingOriginPending=!!activeSession;
       if(!activeSession)resetDesktop();
@@ -918,8 +928,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         else stick.set(0,0);
         camera.rotation.set(desktopPitch+(offset??0),desktopYaw,0,'YXZ');
         camera.getWorldDirection(forwardDir);
-        // the gloves come up into view a little ahead of the gaze and go down with it
-        suit.handsRaised=MathUtils.clamp(-(offset??0)/LOOK_DEPTH*1.3,0,1);
+        // the palms come up into view as the gaze goes down, then drop as it pans away
+        suit.handsRaised=handsCurve(lookIntro);
         suit.handsClock=lookIntro;
       }
     }
@@ -931,12 +941,11 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       astronautEye.set(targetX,ground.surfaceAt(targetX,targetZ,.12)+eyeHeight,targetZ);
       astronautRotation.setFromEuler(astronautEuler.set(viewer?0:desktopPitch,desktopYaw,0,'YXZ'));
       mission.advance(missionDt,astronautEye,astronautRotation);
-      if(telemetry.textContent!==mission.telemetry)telemetry.textContent=mission.telemetry;
       sky.material.uniforms.uEarth.value.w=site.earth?.angularRadius??0;
       sky.material.uniforms.uStarGain.value=site.starGain??1; // same stars during the landing as on foot
       if(mission.view==='Outside' && mission.glideProgress>=1){
         // the camera has reached the astronaut: hand over to the surface walk
-        setMissionView('Surface');telemetry.hidden=true;
+        setMissionView('Surface');
         lookIntro=activeSession?-1:0; // in a headset the wearer looks around freely
         renderer.render(scene,camera);return;
       }
@@ -970,10 +979,10 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if(relocating){renderer.render(scene,camera);return;}
     // Short substeps resolve the surface crossing even when the render cadence varies.
     const steps = Math.ceil(dt * 120);
-    if (!steps) gait.supportY = ground.surfaceAt(head.x, head.z, .12);
+    if (!steps) gait.supportY = walkSupport.surfaceAt(head.x, head.z, stanceRadius);
     let landedJump = false;
     for (let i = 0; i < steps; i++) {
-      if (gait.step(head, east, south, dt / steps, ground, running, sprint) === 'landing') landedJump = true;
+      if (gait.step(head, east, south, dt / steps, walkSupport, running, sprint) === 'landing') landedJump = true;
     }
     contactDt = dt;
     const travelX = head.x-targetX, travelZ = head.z-targetZ;

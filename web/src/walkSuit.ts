@@ -48,9 +48,14 @@ export class WalkSuit {
   private readonly skin: SkinnedMesh<BufferGeometry, MeshStandardMaterial>;
   private readonly target = new Vector3();
   private readonly raisedHand = new Vector3();
-  /** 0..1: how far the gloves are raised in front of the chest (desktop arms only; controllers win) */
+  private readonly forearmAxis = new Vector3();
+  private readonly roll = new Quaternion();
+  /**
+   * 0..1: gloves raised in front of the chest with the forearms level and turned palms-up
+   * (desktop arms only; tracked controllers take precedence)
+   */
   handsRaised = 0;
-  /** seconds driving the raised gloves' small movements */
+  /** seconds driving a slight bob of the raised palms */
   handsClock = 0;
   private readonly pole = new Vector3();
   private readonly feet = new WalkFeet();
@@ -204,14 +209,20 @@ export class WalkSuit {
         const legLead=((pose.center.x-pose.home.x)*sin+(pose.center.z-pose.home.z)*cos)/scale;
         this.target.set(side*(.325+.032*this.motion),.84+.065*this.motion+.18*this.sprintLean,.14-(.50+.45*this.sprintLean)*legLead);
         if (this.handsRaised > 0) {
-          // Both gloves up in front of the chest, opening and closing a little out of step.
-          const c = this.handsClock;
-          const raised = this.raisedHand.set(
-            side*(.19+.055*Math.sin(c*3.1+i*1.7)), 1.1+.035*Math.sin(c*2.4+i*2.3), .40+.03*Math.sin(c*1.9+i));
+          // Elbows bent, forearms level and forward, gloves about waist height, bobbing slightly together.
+          const bob = .012*Math.sin(this.handsClock*2.2);
+          const raised = this.raisedHand.set(side*.24, 1.0+bob, .44);
           this.target.lerp(raised, MathUtils.smootherstep(this.handsRaised,0,1));
         }
       }
       this.arms[i].aim(this.target,this.pole.set(side,.05,-.65));
+      if (!grip && this.handsRaised > 0) {
+        // Supinate: roll the forearm about its own axis until the palm (inward at rest) faces up.
+        const arm = this.arms[i];
+        this.forearmAxis.copy(arm.endOffset).normalize();
+        this.roll.setFromAxisAngle(this.forearmAxis, -side*Math.PI/2*MathUtils.smootherstep(this.handsRaised,.2,1));
+        arm.lower.quaternion.multiply(this.roll);
+      }
     }
   }
 
