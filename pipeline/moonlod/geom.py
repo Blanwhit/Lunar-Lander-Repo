@@ -68,15 +68,6 @@ def latlon_to_dir(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
 
 
-def dir_to_face(d: np.ndarray) -> tuple[int, float, float]:
-    """Single direction -> (face, a, b)."""
-    best = int(np.argmax([np.dot(d, f[0]) for f in FACES]))
-    N, U, V = FACES[best]
-    c = d / np.dot(d, N)
-    s, t = np.dot(c, U), np.dot(c, V)
-    return best, float(np.arctan(s) * 4 / np.pi), float(np.arctan(t) * 4 / np.pi)
-
-
 def height_ab(level: int, x: int, y: int) -> tuple[np.ndarray, np.ndarray]:
     a0, a1, b0, b1 = tile_bounds(level, x, y)
     i = np.arange(-1, TILE_N + 2, dtype=np.float64)
@@ -85,21 +76,10 @@ def height_ab(level: int, x: int, y: int) -> tuple[np.ndarray, np.ndarray]:
     return np.meshgrid(a, b)
 
 
-def height_grid(level: int, face: int, x: int, y: int) -> np.ndarray:
-    """(GRID, GRID, 3) directions of the height samples (row = b index, col = a index)."""
-    A, B = height_ab(level, x, y)
-    return face_dirs(face, A, B)
-
-
 def colour_ab(level: int, x: int, y: int, n: int = COLOUR_N) -> tuple[np.ndarray, np.ndarray]:
     a0, a1, b0, b1 = tile_bounds(level, x, y)
     k = np.arange(n, dtype=np.float64) / (n - 1)
     return np.meshgrid(a0 + k * (a1 - a0), b0 + k * (b1 - b0))
-
-
-def colour_grid(level: int, face: int, x: int, y: int, n: int = COLOUR_N) -> np.ndarray:
-    A, B = colour_ab(level, x, y, n)
-    return face_dirs(face, A, B)
 
 
 def local_cell(level: int, a: np.ndarray, b: np.ndarray, n: int = TILE_N) -> np.ndarray:

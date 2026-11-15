@@ -1,5 +1,5 @@
 import { Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
-import { latLonToDir, R_MOON, Vec3 } from './geom';
+import { R_MOON, Vec3 } from './geom';
 
 // Globe controls in the lunar body frame.
 // The camera orbits a pivot on the surface (target direction `tgt`) at distance `dist`,
@@ -71,16 +71,6 @@ export class GlobeControls {
   orientation() {
     const right = this.fwd.clone().cross(this.tgt).normalize();
     return new Quaternion().setFromRotationMatrix(new Matrix4().makeBasis(right, this.tgt, this.fwd.clone().negate()));
-  }
-
-  faceLocation(lat: number, lon: number) {
-    const up = new Vector3(...latLonToDir(lat,lon));
-    const east = new Vector3(-Math.sin(lon*DEG), Math.cos(lon*DEG), 0);
-    const to = new Quaternion().setFromRotationMatrix(new Matrix4().makeBasis(east, up, east.clone().cross(up)));
-    this.turn = { from: this.orientation(), to, elapsed: 0 };
-    this.omega.set(0,0,0);
-    this.headingVel = 0;
-    this.northing = false;
   }
 
   private frameAt(up: Vector3) {

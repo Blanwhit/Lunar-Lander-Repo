@@ -173,7 +173,7 @@ export class WalkGround {
 
   private buildRing(ring: GroundRing):BufferGeometry {
     const { x: cx, z: cz, half } = ring.bounds;
-    const { step, hole, mesh } = ring;
+    const { step, hole } = ring;
     const size = 2 * ring.halfGrid + 1;
     const position = new Float32Array(size * size * 3);
     const uv = new Float32Array(size * size * 2);
@@ -467,10 +467,6 @@ export class WalkGround {
         rock.topAt(x, z-radius), rock.topAt(x, z+radius));
     }
     return top;
-  }
-
-  blockedAt(x: number, z: number, radius = .15): boolean {
-    return this.nearbyColliders(x, z).some(rock => rock.touches(x, z, radius));
   }
 
   dispose(): void {

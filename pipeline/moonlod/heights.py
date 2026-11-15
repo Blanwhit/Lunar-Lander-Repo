@@ -29,7 +29,7 @@ import zlib
 
 import numpy as np
 
-from .geom import GRID, R_MOON, dirs_to_latlon, face_dirs, height_ab, local_cell, tile_cell_size, tile_probe
+from .geom import dirs_to_latlon, face_dirs, height_ab, local_cell, tile_cell_size, tile_probe
 
 MAGIC = b"MLH1"
 HEADER = struct.Struct("<4sBBBBIIffffHH")

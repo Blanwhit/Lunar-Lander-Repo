@@ -376,11 +376,8 @@ async function main() {
   const proj = new Matrix4();
   let frame = 0;
   let last = performance.now();
-  const perf = { frames: 0, renders: 0, fps: 0, lastFpsT: last, frameMs: 0 };
-  (window as any).__moon = {
-    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, glare, hud, ephem, setTime, overlay, popup,
-    get simMs() { return simMs; },
-  };
+  // console / bench hooks (web/bench/bench.js, README "Site API"); step and siteApi are added below
+  (window as any).__moon = { tree, controls, renderer };
 
   function render(now: number) {
     requestAnimationFrame(render);
@@ -398,7 +395,6 @@ async function main() {
     const fov = (flightFrame?.fov ?? 45) * DEG;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
     needsRender = false;
-    const t0 = performance.now();
     frame++;
 
     const st = controls.state();
@@ -468,8 +464,6 @@ async function main() {
         popup.place(x >= 0 && x <= cw && y >= 0 && y <= ch ? { x, y } : null);
       } else popup.place(null);
     } else popup.place(null);
-    perf.renders++;
-    perf.frameMs = performance.now() - t0;
   }
   hud.setTime(simMs);
   void setTime(simMs);
@@ -598,14 +592,6 @@ async function main() {
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
     (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL })));
-
-  // fps counter (only counts rendered frames; readable via window.__moon.perf)
-  setInterval(() => {
-    const now = performance.now();
-    perf.fps = (perf.renders - perf.frames) / ((now - perf.lastFpsT) / 1000);
-    perf.frames = perf.renders;
-    perf.lastFpsT = now;
-  }, 1000);
 }
 
 /** optional deep link: #lat,lon,dist_m[,heading_deg[,tilt_deg[,ISO-8601 UTC time]]] */

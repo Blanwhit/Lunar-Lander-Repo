@@ -653,10 +653,6 @@ export class TileTree {
     return n.mesh;
   }
 
-  pixelsPerTexelP(fi: FrameInfo) {
-    return fi.viewportHeight / (2 * Math.tan(fi.fovY / 2));
-  }
-
   isBusy(): boolean {
     return this.inflightHeights > 0 || this.inflightColour > 0 || this.arrivals.length > 0 || this.colourArrivals.length > 0;
   }

@@ -139,10 +139,6 @@ export class SitePopup {
     this.el = el;
   }
 
-  get isOpen() {
-    return this.open;
-  }
-
   show(lat: number, lon: number) {
     const lonW = ((((lon + 180) % 360) + 360) % 360) - 180;
     this.coords.textContent = `${fmtDeg(lat)}, ${fmtDeg(lonW)}`;

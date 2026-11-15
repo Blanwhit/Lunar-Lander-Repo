@@ -30,7 +30,7 @@ import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from moonlod import geom  # noqa: E402
-from moonlod.heights import build_heights, child_mask, decode, encode  # noqa: E402
+from moonlod.heights import build_heights, child_mask, encode  # noqa: E402
 from moonlod.sources import load_sources  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
