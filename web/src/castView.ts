@@ -7,6 +7,8 @@ import type { SceneFrame } from './castLink';
 import type { BrowserGlobe } from './globePicker';
 import type { VrFeasibility } from './overlay/vrFeasibility';
 import { createSky,createWalkGround,type WalkSite } from './walk';
+import { WalkFootprints } from './walkFootprints';
+import type { CastSoilTile } from './castSoil';
 import { WalkSuit } from './walkSuit';
 import { LandingMission,preloadMission } from './landingMission';
 import { loadRockSamples } from './lunarRocks';
@@ -15,7 +17,7 @@ import { THIRD_PERSON_LAYER } from './suitGear';
 
 type SiteAt=(lat:number,lon:number)=>Promise<WalkSite>;
 export type CastWorld={renderer:WebGLRenderer;globe:BrowserGlobe;siteAt:SiteAt;scores?:VrFeasibility};
-const keyOf=(f:SceneFrame)=>f.mode==='globe'?'globe':f.site!.join(',');
+const keyOf=(f:SceneFrame)=>f.mode==='globe'?'globe':f.site!.join(',')+'/'+(f.trail??'');
 async function surface(world:CastWorld,frame:SceneFrame) {
   const [lat,lon]=frame.site!;
   const site=await world.siteAt(lat,lon);
@@ -28,6 +30,7 @@ async function surface(world:CastWorld,frame:SceneFrame) {
     throw new Error('Could not load the landing site');
   }
   const ground=g.value,suit=s.value, rocks=r.value;
+  const prints=new WalkFootprints(ground,suit.outsoles);
   const scene=new Scene(), sun=new Vector3().fromArray(frame.sun!).normalize();
   const sky=createSky(site,sun),fill=new HemisphereLight(0xc7cddc,0x878991,.28);
   sky.renderOrder=2e6;sky.material.depthTest=true;
@@ -47,17 +50,19 @@ async function surface(world:CastWorld,frame:SceneFrame) {
   light.shadow.mapSize.set(512,512);light.shadow.normalBias=.003;light.shadow.bias=-.0015/400;
   const mission=new LandingMission(m.value,sun,(x,z)=>ground.floorAt(x,z),(x,z)=>ground.surfaceAt(x,z));
   const dot=new Mesh(new SphereGeometry(.04,10,6),new MeshBasicMaterial({color:0xcae8a8}));
-  scene.add(sky,fill,light,light.target,ground.group,suit.group,mission.group,dot);
+  scene.add(sky,fill,light,light.target,ground.group,prints.group,suit.group,mission.group,dot);
   const loose:Mesh[]=[];
   let anchorX=frame.head[0],anchorZ=frame.head[2],preparing=false,closed=false;
   return {
+    applySoil:(tile:CastSoilTile)=>prints.applyCastTile(tile),
     draw(f:SceneFrame, camera:PerspectiveCamera,renderer:WebGLRenderer,dt:number) {
       const {x,z}=camera.position;
       if(!preparing && Math.hypot(x-anchorX,z-anchorZ)>160){
         preparing=true;
-        void ground.prepareLanding(x,z).then(()=>{anchorX=x;anchorZ=z;shadowX=Infinity;}).catch(()=>{}).finally(()=>{preparing=false;});
+        void ground.prepareLanding(x,z).then(()=>{anchorX=x;anchorZ=z;shadowX=Infinity;if(!closed)prints.rebuildSurface();}).catch(()=>{}).finally(()=>{preparing=false;});
       }
       ground.update(x,z);
+      prints.update(x,z,false);
       light.intensity=f.light??0;fill.intensity=.55-.27*light.intensity/2.5;
 
       suit.group.visible=!!f.body;
@@ -86,7 +91,7 @@ async function surface(world:CastWorld,frame:SceneFrame) {
       if(!closed)renderer.render(scene,camera);
     },
     dispose(){
-      closed=true;ground.dispose();suit.dispose();mission.dispose();light.dispose();
+      closed=true;prints.dispose();ground.dispose();suit.dispose();mission.dispose();light.dispose();
       sky.geometry.dispose();sky.material.dispose();dot.geometry.dispose();dot.material.dispose();scene.clear();
     },
   };
@@ -107,11 +112,17 @@ function blendPose(a:number[],b:number[],t:number,bones=false){
 export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t:string)=>void) {
   const output=castRenderer(canvas,world.renderer);
   const renderer=output.renderer;
+  let contextLost=renderer.getContext().isContextLost();
+  const lost=()=>{contextLost=true;caption('Waiting for the 3D view to recover…');};
+  const restored=()=>{contextLost=false;last=0;};
+  renderer.domElement.addEventListener('webglcontextlost',lost);
+  renderer.domElement.addEventListener('webglcontextrestored',restored);
   const camera=new PerspectiveCamera(75,1,.1,WALK_FAR);
   type Timed={frame:SceneFrame; arrived:number};
   let queue:Timed[]=[],key='',generation=0,closed=false,loading=false;
   let surfaceView:Awaited<ReturnType<typeof surface>>|undefined;
-  let last=0,retryAt=0,mirrored=false;
+  let last=0,retryAt=0;
+  const pendingSoil=new Map<string,{time:number;tile:CastSoilTile}>();
   let relayed=false;
   const clock=new CastPlayback(),resolution=new CastResolution();
   let cssWidth=2,cssHeight=2;
@@ -138,7 +149,7 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
   let animation=0;
   function tick(now:number){
     animation=requestAnimationFrame(tick);
-    if(mirrored)return;
+    if(contextLost)return;
     const latest=queue.at(-1);
     if(!latest)return;
     if(latest.frame.mode==='surface'&&!surfaceView){
@@ -171,6 +182,11 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
       if(f.mode==='surface'){
         if(!surfaceView)return;
         world.scores?.update(now,true);
+        // Build at most one new detail mesh per draw, including after terrain finishes loading.
+        for(const [key,entry] of pendingSoil) {
+          if(entry.time>playTime)continue;
+          surfaceView.applySoil(entry.tile);pendingSoil.delete(key);break;
+        }
         surfaceView.draw(f,camera,renderer,dt);caption(f.heat?(f.score??''):'');
       }else{
         viewRot.setFromMatrix4(rot.makeRotationFromQuaternion(camera.quaternion)).transpose();
@@ -186,12 +202,6 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
   }
   animation=requestAnimationFrame(tick);
   return {
-    shared:output.shared,
-    mirroring(on:boolean){
-      if(mirrored===on)return;
-      mirrored=on;last=0;
-      if(!on){clock.reset();for(const entry of queue)clock.receive(entry.frame.time,entry.arrived);}
-    },
     reset:resetClock,
     frame(f:SceneFrame,viaRelay=false) {
       if(relayed!==viaRelay){resetClock();relayed=viaRelay;}
@@ -202,15 +212,26 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
       }
       const nextKey=keyOf(f);
       if(nextKey!==key){
-        key=nextKey;resolution.reset();generation++;surfaceView?.dispose();surfaceView=undefined;resetClock();loading=false;retryAt=0;
+        pendingSoil.clear();key=nextKey;resolution.reset();generation++;surfaceView?.dispose();surfaceView=undefined;resetClock();loading=false;retryAt=0;
         caption(f.mode==='surface'?'Loading lunar terrain…':'');
+      }
+      const tile=f.soil;
+      if(f.mode==='surface' && tile && Number.isSafeInteger(tile.x) && Number.isSafeInteger(tile.z) &&
+          Number.isSafeInteger(tile.revision) && tile.revision>=0 && typeof tile.heights==='string' && tile.heights.length<=16900) {
+        const tileKey=tile.x+','+tile.z;
+        const pending=pendingSoil.get(tileKey);
+        if(!pending || tile.revision>pending.tile.revision)pendingSoil.set(tileKey,{time:f.time,tile});
+        if(pendingSoil.size>1024)pendingSoil.delete(pendingSoil.keys().next().value!);
       }
       const now=performance.now();
       queue.push({frame:f,arrived:now});
       clock.receive(f.time,now);
       if(queue.length>192)queue.shift();
     },
-    close(){closed=true;observer.disconnect();generation++;cancelAnimationFrame(animation);surfaceView?.dispose();orbitalDot.geometry.dispose();
+    close(){closed=true;
+      renderer.domElement.removeEventListener('webglcontextlost',lost);
+      renderer.domElement.removeEventListener('webglcontextrestored',restored);
+      observer.disconnect();generation++;cancelAnimationFrame(animation);surfaceView?.dispose();orbitalDot.geometry.dispose();
       orbitalDot.material.dispose();output.close();},
   };
 }
