@@ -4,6 +4,7 @@ import {
   Camera,
   Euler,
   GLSL3,
+  MathUtils,
   Matrix3,
   Matrix4,
   Mesh,
@@ -19,6 +20,7 @@ import {
 } from 'three';
 import type { OrbitalRocks } from './terrain/orbitalRocks';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+import { pickLandingInVR, type GlobeHeadset } from './globePicker';
 import { GlobeControls } from './controls';
 import { HelmetAudio } from './helmetAudio';
 import { landingFlight, type LandingFrame } from './landingFlight';
@@ -522,7 +524,38 @@ async function main() {
     if (!site || landingBusy) return;
     void enterVR(site.lat, site.lon);
   };
-  async function enterVR(lat: number, lon: number) {
+  const pickerButton = document.createElement('button');
+  pickerButton.type = 'button';
+  pickerButton.className = 'moon-feas';
+  pickerButton.textContent = 'Choose landing in VR';
+  if (navigator.xr) {
+    const updatePicker = async () => {
+      try {
+        if (await navigator.xr!.isSessionSupported('immersive-vr')) {
+          hud.root.querySelector('.moon-centre')?.append(pickerButton);
+        } else pickerButton.remove();
+      } catch { pickerButton.remove(); }
+    };
+    void updatePicker();
+    navigator.xr.addEventListener('devicechange', updatePicker);
+    pickerButton.onclick = async () => {
+      if (landingBusy || pickerButton.disabled) return;
+      pickerButton.disabled = true;
+      let session: XRSession | undefined;
+      try {
+        session = await navigator.xr!.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
+        const direction = controls.tgt;
+        await pickLandingInVR(session, Math.asin(MathUtils.clamp(direction.z, -1, 1)) / DEG,
+          Math.atan2(direction.y, direction.x) / DEG, enterVR);
+        pickerButton.textContent = 'Choose landing in VR';
+      } catch (error) {
+        await session?.end().catch(() => {});
+        pickerButton.textContent = 'Try VR landing again';
+        console.warn('VR landing picker', error);
+      } finally { pickerButton.disabled = false; }
+    };
+  }
+  async function enterVR(lat: number, lon: number, headset?: GlobeHeadset) {
     landingBusy = true;
     clearTimeout(prefetchTimer);
     // reuse the popup's prefetch for this spot, otherwise start loading now
@@ -611,7 +644,7 @@ async function main() {
       }
       const walkSite = await siteAt(lat, lon, selectedTerrain);
       surfaceStars = walkSite.sky;
-      await startWalk(document.body, { ...walkSite, siteAt, audio, onExit: restore,
+      await startWalk(document.body, { ...walkSite, siteAt, audio, headset, onExit: restore,
         onPrepared(draw) {
           drawApproach = draw;
           ready = true;
@@ -625,6 +658,7 @@ async function main() {
     } catch (error) {
       console.error('Landing failed', error);
       restore();
+      if (headset) throw error;
     }
   }
   requestAnimationFrame(render);
