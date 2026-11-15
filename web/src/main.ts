@@ -80,6 +80,8 @@ async function main() {
     ktx2,
   );
 
+  // upload new tile textures while promoting them, inside the per-frame streaming budget
+  tree.uploadTexture = (t) => renderer.initTexture(t);
   const controls = new GlobeControls(canvas, (d) => tree.heightAt(d));
   controls.fovY = FOV_Y;
   controls.maxDist = (R_MOON / Math.sin(FOV_Y / 2)) * 1.15;
@@ -297,16 +299,19 @@ async function main() {
   tree.onChange = () => (needsRender = true);
 
   // progressive star cubemaps: the small one immediately, larger ones only once the
-  // terrain base level is in and the tile queue is idle (keeps the initial load small)
+  // terrain base level is in and the tile queue is idle (keeps the initial load small).
+  // A large cubemap is a one-off upload of several MB (one long frame), so it is swapped in
+  // only while nothing streams and the camera is at rest.
+  const quiet = () => tree.roots.every((r) => r.colourState === 2) && !tree.isBusy() && !controls.isAnimating();
   (async () => {
     const files = meta.stars ?? [];
     for (let i = 0; i < files.length; i++) {
       if (i > 0) {
-        while (!tree.roots.every((r) => r.colourState === 2) || tree.isBusy())
-          await new Promise((r) => setTimeout(r, 500));
+        while (!quiet()) await new Promise((r) => setTimeout(r, 500));
       }
       try {
         const tex = (await ktx2.loadAsync(base + files[i])) as unknown as CubeTexture;
+        if (i > 0) while (!quiet()) await new Promise((r) => setTimeout(r, 250));
         tex.magFilter = LinearFilter;
         tex.minFilter = tex.mipmaps && tex.mipmaps.length > 1 ? LinearMipmapLinearFilter : LinearFilter;
         tex.needsUpdate = true;
@@ -409,7 +414,7 @@ async function main() {
       skyMat.uniforms.uSun.value = [toSun.x, toSun.y, toSun.z, sunR];
       skyMat.uniforms.uEarth.value = [toEarth.x, toEarth.y, toEarth.z, Math.asin((R_EARTH_KM * 1000) / de)];
       // glare, faded by how much of the disc the terrain / limb leaves visible
-      const vis = sunVisibleFraction(st.camPos, toSun, sunR, (d) => tree.heightAt(d));
+      const vis = () => sunVisibleFraction(st.camPos, toSun, sunR, (d) => tree.heightAt(d));
       const tanHalf: [number, number] = [Math.tan(FOV_Y / 2) * aspect, Math.tan(FOV_Y / 2)];
       if (glare.update(st.viewRot, toSun, sunR, vis, tanHalf, (2 * Math.tan(FOV_Y / 2)) / h, dt)) needsRender = true;
     }

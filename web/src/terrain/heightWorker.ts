@@ -49,81 +49,72 @@ function toHalf(v: number): number {
   return (m & 0x1000) !== 0 ? h + 1 : h;
 }
 
-async function decode(req: HeightRequest): Promise<HeightResult> {
+// scratch buffers reused across tiles (positions and unit directions, GRID^2 x 3)
+const P = new Float64Array(GRID * GRID * 3);
+const D = new Float64Array(GRID * GRID * 3);
+const sArr = new Float64Array(GRID);
+// native float -> half conversion where available (round to nearest even); toHalf otherwise
+const HAS_F16 = typeof (globalThis as { Float16Array?: unknown }).Float16Array === 'function';
+
+/** tangent-space (e1, e2) components of the surface normal at each of the 257^2 vertices */
+export function bakeNormals(face: number, level: number, x: number, y: number, base: number, step: number, q: Uint16Array): Uint16Array {
+  const G = GRID;
+  const F = FACES[face];
+  const [Nx, Ny, Nz] = F.n, [Ux, Uy, Uz] = F.u, [Vx, Vy, Vz] = F.v;
+  const span = 2 / (1 << level);
+  const a0 = -1 + x * span;
+  const b0 = -1 + y * span;
+  // positions on the terrain; N, U, V are orthonormal, so |N + sU + tV| = sqrt(1 + s^2 + t^2)
+  for (let i = 0; i < G; i++) sArr[i] = Math.tan((Math.PI / 4) * (a0 + ((i - 1) / TILE_N) * span));
+  for (let j = 0; j < G; j++) {
+    const t = Math.tan((Math.PI / 4) * (b0 + ((j - 1) / TILE_N) * span));
+    const tt = 1 + t * t;
+    for (let i = 0, k = j * G, k3 = 3 * k; i < G; i++, k++, k3 += 3) {
+      const s = sArr[i];
+      const inv = 1 / Math.sqrt(tt + s * s);
+      const dx = (Nx + s * Ux + t * Vx) * inv, dy = (Ny + s * Uy + t * Vy) * inv, dz = (Nz + s * Uz + t * Vz) * inv;
+      const r = R_MOON + base + q[k] * step;
+      D[k3] = dx; D[k3 + 1] = dy; D[k3 + 2] = dz;
+      P[k3] = dx * r; P[k3 + 1] = dy * r; P[k3 + 2] = dz * r;
+    }
+  }
+  const out = HAS_F16 ? new (globalThis as unknown as { Float16Array: Float32ArrayConstructor }).Float16Array(V * V * 2) : null;
+  const normals = out ? new Uint16Array(out.buffer) : new Uint16Array(V * V * 2);
+  const G3 = 3 * G;
+  for (let j = 0; j < V; j++) {
+    for (let i = 0, k3 = 3 * ((j + 1) * G + 1), o = 2 * j * V; i < V; i++, k3 += 3, o += 2) {
+      // central differences along the grid, normal = (dP/da) x (dP/db)
+      const ax = P[k3 + 3] - P[k3 - 3], ay = P[k3 + 4] - P[k3 - 2], az = P[k3 + 5] - P[k3 - 1];
+      const bx = P[k3 + G3] - P[k3 - G3], by = P[k3 + G3 + 1] - P[k3 - G3 + 1], bz = P[k3 + G3 + 2] - P[k3 - G3 + 2];
+      const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const ni = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
+      // tangent frame: up = dir, e1 = normalize(U - up (U.up)), e2 = up x e1
+      const ux = D[k3], uy = D[k3 + 1], uz = D[k3 + 2];
+      const ud = Ux * ux + Uy * uy + Uz * uz;
+      const e1x = Ux - ux * ud, e1y = Uy - uy * ud, e1z = Uz - uz * ud;
+      const ei = 1 / Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+      const e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+      const c1 = (nx * e1x + ny * e1y + nz * e1z) * ni * ei;
+      const c2 = (nx * e2x + ny * e2y + nz * e2z) * ni * ei;
+      if (out) {
+        out[o] = c1;
+        out[o + 1] = c2;
+      } else {
+        normals[o] = toHalf(c1);
+        normals[o + 1] = toHalf(c2);
+      }
+    }
+  }
+  return normals;
+}
+
+export async function decode(req: HeightRequest): Promise<HeightResult> {
   const res = await fetch(req.url);
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
   const compressed = await res.arrayBuffer();
   const t = await decodeHeightTile(compressed);
   const { level, face, childMask, x, y, hmin, hmax, step, base, q } = t;
-  const G = GRID;
-  const n = G * G;
-
-  // ---- normals (body frame, then projected onto the per-vertex tangent frame)
-  const F = FACES[face];
-  const nTiles = 1 << level;
-  const span = 2 / nTiles;
-  const a0 = -1 + x * span;
-  const b0 = -1 + y * span;
-  const P = new Float64Array(n * 3);
-  const D = new Float64Array(n * 3);
-  const sArr = new Float64Array(G);
-  for (let i = 0; i < G; i++) sArr[i] = Math.tan((Math.PI / 4) * (a0 + ((i - 1) / TILE_N) * span));
-  for (let j = 0; j < G; j++) {
-    const t = Math.tan((Math.PI / 4) * (b0 + ((j - 1) / TILE_N) * span));
-    for (let i = 0; i < G; i++) {
-      const s = sArr[i];
-      const cx = F.n[0] + s * F.u[0] + t * F.v[0];
-      const cy = F.n[1] + s * F.u[1] + t * F.v[1];
-      const cz = F.n[2] + s * F.u[2] + t * F.v[2];
-      const l = Math.hypot(cx, cy, cz);
-      const k = j * G + i;
-      const r = R_MOON + base + q[k] * step;
-      D[3 * k] = cx / l;
-      D[3 * k + 1] = cy / l;
-      D[3 * k + 2] = cz / l;
-      P[3 * k] = (cx / l) * r;
-      P[3 * k + 1] = (cy / l) * r;
-      P[3 * k + 2] = (cz / l) * r;
-    }
-  }
-  const normals = new Uint16Array(V * V * 2);
-  const U = F.u;
-  for (let j = 0; j < V; j++) {
-    for (let i = 0; i < V; i++) {
-      const k = (j + 1) * G + (i + 1);
-      const ax = P[3 * (k + 1)] - P[3 * (k - 1)];
-      const ay = P[3 * (k + 1) + 1] - P[3 * (k - 1) + 1];
-      const az = P[3 * (k + 1) + 2] - P[3 * (k - 1) + 2];
-      const bx = P[3 * (k + G)] - P[3 * (k - G)];
-      const by = P[3 * (k + G) + 1] - P[3 * (k - G) + 1];
-      const bz = P[3 * (k + G) + 2] - P[3 * (k - G) + 2];
-      let nx = ay * bz - az * by;
-      let ny = az * bx - ax * bz;
-      let nz = ax * by - ay * bx;
-      const nl = Math.hypot(nx, ny, nz);
-      nx /= nl;
-      ny /= nl;
-      nz /= nl;
-      // tangent frame: up = dir, e1 = normalize(U - up (U.up)), e2 = up x e1
-      const ux = D[3 * k];
-      const uy = D[3 * k + 1];
-      const uz = D[3 * k + 2];
-      const ud = U[0] * ux + U[1] * uy + U[2] * uz;
-      let e1x = U[0] - ux * ud;
-      let e1y = U[1] - uy * ud;
-      let e1z = U[2] - uz * ud;
-      const el = Math.hypot(e1x, e1y, e1z);
-      e1x /= el;
-      e1y /= el;
-      e1z /= el;
-      const e2x = uy * e1z - uz * e1y;
-      const e2y = uz * e1x - ux * e1z;
-      const e2z = ux * e1y - uy * e1x;
-      const o = 2 * (j * V + i);
-      normals[o] = toHalf(nx * e1x + ny * e1y + nz * e1z);
-      normals[o + 1] = toHalf(nx * e2x + ny * e2y + nz * e2z);
-    }
-  }
+  const normals = bakeNormals(face, level, x, y, base, step, q);
   return {
     id: req.id, ok: true, level, face, x, y, childMask, hmin, hmax, base, step, q, normals,
     bytes: compressed.byteLength,

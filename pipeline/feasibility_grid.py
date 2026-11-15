@@ -290,12 +290,21 @@ def along(up, east, north, az_deg, dist):
     return up * np.cos(th)[..., None] + hd * np.sin(th)[..., None]
 
 
+MARCH_CHUNK = int(os.environ.get("FEAS_CHUNK", "16384"))  # rays per block (cache-sized temporaries)
+
+
 def march_horizon(T: Terrain, U, HD, r0, d):
     """Terrain horizon of every ray (start U, horizontal direction HD, radius r0) as the best
     elevation tangent. The elevation e = atan2(r1 cos th - r0, r1 sin th) has r1 sin th > 0,
-    so atan is monotonic in the tangent: compare tangents, take one arctan at the end."""
+    so atan is monotonic in the tangent: compare tangents, take one arctan at the end.
+    Rays are independent and share the step sequence, so they are marched in blocks whose
+    temporaries stay in the CPU cache (same result as one big block)."""
+    n = U.shape[0]
+    if n > MARCH_CHUNK:
+        return np.concatenate([march_horizon(T, U[i:i + MARCH_CHUNK], HD[i:i + MARCH_CHUNK], r0[i:i + MARCH_CHUNK], d)
+                               for i in range(0, n, MARCH_CHUNK)])
     rtop = R + H_MAX
-    best = np.full(U.shape[0], -np.inf)
+    best = np.full(n, -np.inf)
     # all rays in lock-step; the still-active ones are kept as compacted arrays
     ids, Ua, HDa, r0a, ba = np.arange(U.shape[0]), U, HD, r0, best.copy()
     while d < 800e3 and ids.size:

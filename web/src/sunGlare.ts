@@ -79,14 +79,17 @@ export class SunGlare {
 
   /**
    * Update for this frame. Returns true while the visibility is still easing (keep rendering).
-   * @param toSun   unit direction camera -> Sun (body frame)
-   * @param sunR    angular radius of the Sun (rad)
-   * @param target  visible fraction of the disc (0..1)
+   * @param toSun      unit direction camera -> Sun (body frame)
+   * @param sunR       angular radius of the Sun (rad)
+   * @param visibility visible fraction of the disc (0..1); only called (it marches a ray over
+   *                   the terrain) when the pass can draw, i.e. the Sun is near the view
    */
-  update(viewRot: Matrix3, toSun: Vector3, sunR: number, target: number, tanHalf: [number, number], pixAngle: number, dt: number): boolean {
+  update(viewRot: Matrix3, toSun: Vector3, sunR: number, visibility: () => number, tanHalf: [number, number], pixAngle: number, dt: number): boolean {
+    const v = toSun.clone().applyMatrix3(viewRot);
+    const inView = -v.z > COS_70;
+    const target = inView ? visibility() : 0;
     this.vis += (target - this.vis) * (1 - Math.exp(-dt * 14));
     if (Math.abs(target - this.vis) < 0.004) this.vis = target;
-    const v = toSun.clone().applyMatrix3(viewRot);
     const u = this.mat.uniforms;
     (u.uSunV.value as Vector3).copy(v);
     u.uSunT.value = v.z < -1e-6 ? [v.x / -v.z, v.y / -v.z] : [v.x * 1e3, v.y * 1e3];
@@ -96,7 +99,7 @@ export class SunGlare {
     u.uPix.value = pixAngle;
     // skip the pass when nothing would show: hidden, or the Sun > 70 deg off the view axis
     // (the veil is < 1/500 there, below one 8-bit step)
-    this.mesh.visible = this.vis > 0.002 && -v.z > COS_70;
+    this.mesh.visible = this.vis > 0.002 && inView;
     return this.vis !== target;
   }
 }

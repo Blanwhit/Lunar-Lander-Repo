@@ -72,7 +72,7 @@ instead of `.venv/Scripts/python` (the Makefile picks the right one).
 | 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star layers, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
 | 4 | `make basisu` | fetches Basis Universal v1_50_0_2 from GitHub and compiles it with g++ | `tools/basisu(.exe)` | a few min |
 | 5 | `make tiles` | overviews → heights → colour → stars → meta → stats → ephem → earth (see below) | `web/public/tiles/` (3.2 GB), `web/public/ephem/`, `web/public/sky/earth.jpg` | ~50 min |
-| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | ~1–1.5 h |
+| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | ~40 min |
 | 7 | `make build` | type-check + `vite build`; copies `web/public` including the tiles | `web/dist/` (~3.2 GB static site) | ~1 min |
 | 8 | `make serve` | serves `web/dist` | http://localhost:4173 | |
 | | `make pack` | optional: losslessly packs `data/raw` (10.9 → 5.1 GB, SHA-256 verified); `make unpack` restores it bit-exact | `data/raw_packed/` | |
@@ -142,7 +142,7 @@ does something when the `feasibility` block is present.
 
 * **Feasibility comes last.** It reads the finished height tiles and the 2026 ephemeris, then adds
   its entry to `meta.json`. Re-running `make meta` (or `make tiles`) later keeps that entry as long
-  as `tiles/f/` exists, so the ~1–1.5 h step never has to be repeated just to restore it. Rerun
+  as `tiles/f/` exists, so the ~40 min step never has to be repeated just to restore it. Rerun
   `make feasibility` only when its inputs change: new height tiles (another `MAX_LEVEL`, other
   DEM sources or settings) or different feasibility options. Deleting `tiles/f/` and running
   `make meta` removes the entry.
@@ -299,7 +299,7 @@ ones arrive.
 |---|---|
 | score tiles | 830: levels 0–3 global (510), levels 4–6 polar (320); 3.40 M samples |
 | size | 146 MB in `web/public/tiles/f/` |
-| precompute | ~1.2 h on a 32-thread laptop (24 workers), estimated from per-tile timings (2.2× faster per tile than the first build, which took 2.6 h; output byte-identical), plus 5 min to build the decoded height store (`data/cache`, 4.1 GB, regenerable) |
+| precompute | 38 min on a 32-thread laptop (24 workers; the first version took 2.6 h, and the rebuild is byte-identical to it for all 830 tiles), plus 5 min to build the decoded height store (`data/cache`, 4.1 GB, regenerable). The horizon rays are marched in cache-sized blocks of 16 384 (`FEAS_CHUNK`), which matters most when all workers share the memory bandwidth |
 | overlay update after a date change | scoring is 3× faster than the first version (~19 ms per 64 × 64 tile instead of ~56 ms, one thread); the whole-Moon view was fully coloured 0.8 s after switching the overlay on (3 workers, tiles loading included). A new region also waits for its score tiles to load. The previous colours stay until the new ones arrive |
 | overlay vs API, same point and time | equatorial and mid-latitude samples within 0.2 points. Polar samples are typically within 0–4 points, up to ~20 where the 5 m and 20 m terrain give different slopes |
 
@@ -411,7 +411,10 @@ after lossless compaction:
   no jitter at 5 m/px. The near and far planes adapt to the height above the terrain.
 * **Streaming**: height tiles are fetched and decoded in a worker pool and prioritised by
   screen-space error. Colour KTX2 files are transcoded in three.js's KTX2Loader workers. An LRU
-  evicts GPU textures above the budget (384 MB).
+  evicts GPU textures above the budget (384 MB). The worker's normal-map bake takes ~2 ms per
+  tile (reused scratch buffers, `sqrt(1 + s² + t²)` for the cube-sphere direction length, native
+  `Float16Array` conversion where available), so a new 3 km view refines about twice as fast as
+  before (a fresh mare site: 104 tiles in 0.35 s instead of 1.04 s, local dev server).
 * **Render on demand**: a frame is drawn only when the camera moves, inertia is active, or a tile
   arrives.
 * **Time and sky bodies** ([ephemeris.ts](web/src/ephemeris.ts), [time.ts](web/src/time.ts)): UTC
@@ -505,9 +508,12 @@ so the terrain cost dominates. They haven't been re-measured.
   `pixelsPerTexel` (LOD threshold) in [main.ts](web/src/main.ts), `?mesh=32|64|128` (mesh density),
   and `gpuBudgetBytes`. We have not measured it on such hardware. Run `moonBench()` from
   [bench.js](web/bench/bench.js) in the console to get your own numbers.
-* Streaming: finished tiles are promoted to the GPU at most 2–8 per frame, within a 3 ms budget.
-  Before this throttle, frames during fast flights spiked to 87–132 ms p95. With it they stay at
-  5–6 ms.
+* Streaming: finished tiles are promoted to the GPU at least 1 and at most 8 per frame, within a
+  3 ms budget that includes the texture uploads (`renderer.initTexture` while promoting, not later
+  inside `render`). Before this throttle, frames during fast flights spiked to 87–132 ms p95. With
+  it they stay at 5–6 ms (a fresh 3 km polar view: 284 tiles, p95 3.1 ms, worst 5.4 ms). The large
+  star cubemap (a one-off upload of several MB) is swapped in only while no tiles stream and the
+  camera is at rest.
 
 ### Initial payload (production build, measured)
 

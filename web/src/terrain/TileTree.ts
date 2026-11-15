@@ -227,7 +227,6 @@ export class TileTree {
   private fallbackColour = makeFallbackColour();
   private frustum = new Frustum();
   private tmpM = new Matrix4();
-  private tmpV = new Vector3();
   private sphere = new Sphere();
   gpuBytes = 0;
   private baseReady = false;
@@ -236,6 +235,9 @@ export class TileTree {
   bytesDownloaded = 0;
   drawn: TileNode[] = [];
   onChange: () => void = () => {};
+  /** uploads a texture to the GPU now (renderer.initTexture), so the per-frame promotion
+   *  budget in drainArrivals() measures the real upload cost instead of deferring it to render */
+  uploadTexture: ((t: Texture) => void) | null = null;
   stats = { drawn: 0, triangles: 0, loaded: 0, maxLevelDrawn: 0 };
 
   constructor(readonly opts: TerrainOptions, private ktx2: KTX2Loader) {
@@ -335,7 +337,8 @@ export class TileTree {
   }
 
   private distTo(n: TileNode, cam: Vec3): number {
-    return Math.max(0, Math.hypot(n.centre[0] - cam[0], n.centre[1] - cam[1], n.centre[2] - cam[2]) - n.radius);
+    const dx = n.centre[0] - cam[0], dy = n.centre[1] - cam[1], dz = n.centre[2] - cam[2];
+    return Math.max(0, Math.sqrt(dx * dx + dy * dy + dz * dz) - n.radius);
   }
 
   private visible(n: TileNode, fi: FrameInfo, camR: number): boolean {
@@ -454,19 +457,22 @@ export class TileTree {
     }
   }
 
-  /** promote a few finished downloads per frame (bounded GPU upload work per frame) */
+  /** promote a few finished downloads per frame (bounded GPU upload work per frame): at least
+   *  one height tile, then more while the ~3 ms budget lasts (uploads included, see uploadTexture) */
   private drainArrivals() {
     const t0 = performance.now();
+    const BUDGET_MS = 3;
     let k = 0;
-    while (this.arrivals.length && (k < 2 || performance.now() - t0 < 3) && k < 8) {
+    while (this.arrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < 8) {
       this.onHeight(this.arrivals.shift()!);
       k++;
     }
     k = 0;
-    while (this.colourArrivals.length && k < 4) {
+    while (this.colourArrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < 4) {
       const [n, tex] = this.colourArrivals.shift()!;
       if (n.colourState === LOADING) {
         n.colourTex = tex;
+        this.uploadTexture?.(tex);
         n.colourState = READY;
         this.gpuBytes += COLOUR_BYTES;
       } else tex.dispose();
@@ -509,6 +515,10 @@ export class TileTree {
     nt.needsUpdate = true;
     n.heightTex = ht;
     n.normalTex = nt;
+    if (this.uploadTexture) {
+      this.uploadTexture(ht);
+      this.uploadTexture(nt);
+    }
     n.state = READY;
     this.gpuBytes += HEIGHT_BYTES + NORMAL_BYTES;
     this.stats.loaded++;
@@ -635,9 +645,8 @@ export class TileTree {
       u.uFeas.value = fz.tex;
       (u.uFeasXf.value as Vector3).set(fz.scale, fz.ou, fz.ov);
     }
-    const dist = Math.hypot(n.centre[0] - fi.camPos[0], n.centre[1] - fi.camPos[1], n.centre[2] - fi.camPos[2]);
-    n.mesh.renderOrder = 10 + Math.min(1e6, dist / 10); // front to back
-    void this.tmpV;
+    const dx = n.centre[0] - fi.camPos[0], dy = n.centre[1] - fi.camPos[1], dz = n.centre[2] - fi.camPos[2];
+    n.mesh.renderOrder = 10 + Math.min(1e6, Math.sqrt(dx * dx + dy * dy + dz * dz) / 10); // front to back
     return n.mesh;
   }
 

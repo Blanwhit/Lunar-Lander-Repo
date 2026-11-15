@@ -294,24 +294,26 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       maxDist = 0;
       for (let i = 0; i < n; i++) {
         const az = i * azStep;
-        let best = -Math.PI / 2;
+        // elevation atan2(r1 cos th - r0, r1 sin th) with r1 sin th > 0 is monotonic in the
+        // tangent (r1 cos th - r0) / (r1 sin th): compare tangents, one atan at the end
+        let best = -Infinity;
         let d = d0;
         while (d < 800e3) {
           const th = d / R_MOON;
           const c = Math.cos(th), s = Math.sin(th);
           // nothing on the Moon is higher than H_MAX: stop when even that would be lower
-          if (Math.atan2(rTop * c - r0, rTop * s) < best) break;
+          if ((rTop * c - r0) / (rTop * s) < best) break;
           const cellMax = Math.max(d * ANG, 1);
           const L = Math.max(0, Math.ceil(Math.log2(texelSize(0) / cellMax)));
           const smp = terrain.sample(dirAt(f, az, d), L);
           if (!isNaN(smp.h)) {
             const r1 = R_MOON + smp.h;
-            const e = Math.atan2(r1 * c - r0, r1 * s);
+            const e = (r1 * c - r0) / (r1 * s);
             if (e > best) best = e;
           }
           d += Math.max(0.75 * texelSize(Math.max(smp.level, 0)), d * 0.01);
         }
-        elev[i] = best / DEG;
+        elev[i] = Math.atan(best) / DEG;
         if (d > maxDist) maxDist = d;
       }
       return 0;

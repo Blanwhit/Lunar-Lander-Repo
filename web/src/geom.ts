@@ -41,22 +41,28 @@ export function faceDir(face: number, a: number, b: number, out: Vec3 = [0, 0, 0
   return out;
 }
 
-/** direction -> face + face coords (a, b) */
+/**
+ * direction -> face + face coords (a, b). Every FACES axis is a signed unit axis, so the face
+ * is the largest |component| (ties: x, then y, then z, like taking the first face with the
+ * largest d . N) and d . U, d . V are single signed components:
+ *   +X: U=+y V=+z   -X: U=-y V=+z   +Y: U=-x V=+z   -Y: U=+x V=+z   +Z: U=+y V=-x   -Z: U=+y V=+x
+ */
 export function dirToFace(d: Vec3): { face: number; a: number; b: number } {
-  let best = 0;
-  let bd = -Infinity;
-  for (let f = 0; f < 6; f++) {
-    const n = FACES[f].n;
-    const dd = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
-    if (dd > bd) {
-      bd = dd;
-      best = f;
-    }
+  const x = d[0], y = d[1], z = d[2];
+  const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+  // `0 - c` rather than `-c`: a zero component gives +0, like the dot product did
+  let face: number, dn: number, u: number, v: number;
+  if (ax >= ay && ax >= az) {
+    if (x >= 0) { face = 0; dn = x; u = y; } else { face = 1; dn = -x; u = 0 - y; }
+    v = z;
+  } else if (ay >= az) {
+    if (y >= 0) { face = 2; dn = y; u = 0 - x; } else { face = 3; dn = -y; u = x; }
+    v = z;
+  } else {
+    if (z >= 0) { face = 4; dn = z; v = 0 - x; } else { face = 5; dn = -z; v = x; }
+    u = y;
   }
-  const F = FACES[best];
-  const s = (d[0] * F.u[0] + d[1] * F.u[1] + d[2] * F.u[2]) / bd;
-  const t = (d[0] * F.v[0] + d[1] * F.v[1] + d[2] * F.v[2]) / bd;
-  return { face: best, a: (Math.atan(s) * 4) / Math.PI, b: (Math.atan(t) * 4) / Math.PI };
+  return { face, a: (Math.atan(u / dn) * 4) / Math.PI, b: (Math.atan(v / dn) * 4) / Math.PI };
 }
 
 export function tileBounds(level: number, x: number, y: number) {
