@@ -12,6 +12,15 @@ const CELL = 0.125;
 // Two peaks at the DEM's maximum elevation can see one another across ~527 km.
 // Fixed landing-centred rings extend well beyond that horizon.
 const RINGS = 20;
+/** Yield to the event loop (no timer clamping or background throttling). */
+function nextTask() {
+  return new Promise<void>(resolve => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
+}
+
 export const WALK_FAR = CELL * 16 * 2 ** (RINGS - 1) * 1.6;
 
 function noise(x: number, z: number, seed: number): number {
@@ -70,7 +79,7 @@ export class WalkGround {
 
   constructor(private readonly height: (x: number, z: number) => number,
     private readonly seed: number, private readonly rocky = 1, private readonly samples: RockSample[] = [],
-    private readonly soil?: SoilMaps, landingToBody = new Matrix4(), deferBuild = false,
+    private readonly soil?: SoilMaps, landingToBody = new Matrix4(),
     private readonly field?: BoulderField) {
     soilUV(0, 0, this.coords);
     this.originRelief = soil ? scanHeight(soil, this.coords) : 0;
@@ -111,10 +120,6 @@ export class WalkGround {
       }));
       this.bands.push({ spread, batches, cx: Infinity, cz: Infinity, viewX: Infinity, viewZ: Infinity });
     }
-    if (!deferBuild) {
-      for (const ring of this.rings) ring.mesh.geometry=this.buildRing(ring);
-      this.update(0, 0);
-    }
   }
 
   private surface(x: number, z: number): number {
@@ -151,8 +156,8 @@ export class WalkGround {
         if(this.disposed)break;
         const previous=this.rings[i];
         if(!resample && previous.mesh.geometry.index && same(previous.bounds,ring.bounds) && same(previous.hole,ring.hole))continue;
-        geometries.set(i,this.buildRing(ring));
-        await new Promise<void>(resolve=>setTimeout(resolve,0));
+        geometries.set(i,await this.buildRing(ring));
+        await nextTask();
       }
     } catch(error) {
       for(const g of geometries.values()) g.dispose();
@@ -171,7 +176,9 @@ export class WalkGround {
     this.update(x,z);
   }
 
-  private buildRing(ring: GroundRing):BufferGeometry {
+  /** Built in slices of a few ms (yielding between them), so a flight animating meanwhile keeps
+   *  its frame rate; one ring takes 20-50 ms of height sampling in total. */
+  private async buildRing(ring: GroundRing):Promise<BufferGeometry> {
     const { x: cx, z: cz, half } = ring.bounds;
     const { step, hole } = ring;
     const size = 2 * ring.halfGrid + 1;
@@ -180,7 +187,13 @@ export class WalkGround {
     const color = new Float32Array(size * size * 3);
     const alternate = new Float32Array(size * size * 3);
     const indices: number[] = [];
-    for (let row = 0; row < size; row++) for (let col = 0; col < size; col++) {
+    let slice = performance.now();
+    for (let row = 0; row < size; row++) {
+      if (performance.now() - slice > 6) {
+        await nextTask();
+        slice = performance.now();
+      }
+      for (let col = 0; col < size; col++) {
       const x = cx - half + col * step, z = cz - half + row * step, i = row * size + col;
       let y = this.surface(x, z);
       // Match every outer edge sample to the triangle edge on the next coarser ring.
@@ -201,6 +214,7 @@ export class WalkGround {
       if (hole && Math.abs(x + step / 2 - hole.x) < hole.half &&
           Math.abs(z + step / 2 - hole.z) < hole.half) continue;
       indices.push(i, i + size, i + 1, i + 1, i + size, i + size + 1);
+      }
     }
     const geo = new BufferGeometry();
     geo.setAttribute('position', new BufferAttribute(position, 3));
