@@ -218,13 +218,25 @@ async function main() {
       if (token === siteToken) {
         popup.setScore(r.feasibility.score);
         info.setReport(r);
-        void loadSeries(); // after the report: both share the site's horizon and annual statistics
+        // the popup's next-month trend, then the panel's graphs: all reuse the site's horizon
+        // and annual statistics computed by the report
+        const month = api.timeSeries({ lat: r.query.lat, lon: r.query.lon, start: simMs, spanMs: 30 * 86400e3, signal: abort.signal });
+        void loadSeries();
+        try {
+          const s = await month;
+          if (token === siteToken) popup.setTrend(s);
+        } catch (e) {
+          if (abort.signal.aborted) return;
+          console.warn('site month trend', e);
+          if (token === siteToken) popup.setTrend(null);
+        }
       }
     } catch (e) {
       if (abort.signal.aborted) return; // superseded or the popup closed
       console.warn('site query', e);
       if (token === siteToken) {
         popup.setScore(null);
+        popup.setTrend(null);
         info.setError();
       }
     }

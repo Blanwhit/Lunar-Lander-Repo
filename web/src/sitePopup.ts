@@ -1,6 +1,7 @@
 // Right-click site inspector: a dismissible hint at the top of the screen, and a popup
-// anchored to the picked surface point (coordinates, colour-coded feasibility score,
-// "More info" / "Land" actions). Plain DOM, styled like the bottom HUD.
+// anchored to the picked surface point (coordinates, colour-coded feasibility score with its
+// next-month trend, "More info" / "Land" actions). Plain DOM, styled like the bottom HUD.
+import { scoreColor } from './siteGraphs';
 
 const CSS = `
 .moon-hint {
@@ -24,7 +25,7 @@ const CSS = `
 
 .moon-site {
   position: fixed; left: 0; top: 0; z-index: 3; box-sizing: border-box;
-  width: max-content; max-width: min(340px, calc(100vw - 32px));
+  width: min(340px, calc(100vw - 32px));
   padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px;
   background: rgba(32, 33, 36, 0.92); border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
   font: 500 14px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #e8eaed;
@@ -42,7 +43,7 @@ const CSS = `
 .moon-site .coords { padding-right: 22px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .moon-site .coords .k { color: #9aa0a6; margin-right: 6px; }
 
-.moon-site .feas { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px;
+.moon-site .feas { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; box-sizing: border-box; min-height: 39px;
   border: 1px solid #5f6368; background: rgba(95, 99, 104, 0.18); white-space: nowrap; }
 .moon-site .feas .val { margin-left: auto; font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
 .moon-site .feas .tier { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
@@ -60,6 +61,17 @@ const CSS = `
   animation: moon-spin 0.8s linear infinite; margin-left: auto; }
 @keyframes moon-spin { to { transform: rotate(360deg); } }
 
+/* next-month feasibility trend under the score (colours as in the graph panel); the popup has a
+   fixed width and the chart a fixed aspect, so nothing moves when the series arrives */
+.moon-site .trend { display: flex; flex-direction: column; gap: 2px; margin-top: -2px; }
+.moon-site .trend[hidden] { display: none; }
+.moon-site .trend .hd { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: #9aa0a6; }
+.moon-site .trend .hd .rd { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.moon-site .trend .hd .rd b { color: #e8eaed; font-weight: 700; }
+.moon-site .trend .body { aspect-ratio: 300 / 58; }
+.moon-site .trend svg { display: block; width: 100%; height: 100%; touch-action: none; }
+.moon-site .trend svg text { fill: #9aa0a6; font: 500 9px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.moon-site .trend .wait { height: 100%; display: grid; place-items: center; font-size: 12px; color: #80868b; }
 .moon-site .btns { display: flex; gap: 10px; }
 /* same look as the surface walk's light button (walk.ts: "Enter headset") */
 .moon-site .btns button { all: unset; flex: 1; box-sizing: border-box; text-align: center; cursor: pointer;
@@ -102,6 +114,9 @@ export class SitePopup {
   private pin: HTMLDivElement;
   private coords: HTMLSpanElement;
   private feas: HTMLDivElement;
+  private trend: HTMLDivElement;
+  private trendRead: HTMLSpanElement;
+  private trendBody: HTMLDivElement;
   private open = false;
   /** called when the popup is closed by the user */
   onClose: () => void = () => {};
@@ -128,9 +143,13 @@ export class SitePopup {
       <button type="button" class="close" aria-label="Close">×</button>
       <div class="coords"><span class="k">Coordinates:</span><span class="v"></span></div>
       <div class="feas"></div>
+      <div class="trend"><div class="hd"><span>Next 30 days</span><span class="rd"></span></div><div class="body"></div></div>
       <div class="btns"><button type="button" data-act="info">More info</button><button type="button" data-act="vr">Land</button></div>`;
     this.coords = el.querySelector('.coords .v') as HTMLSpanElement;
     this.feas = el.querySelector('.feas') as HTMLDivElement;
+    this.trend = el.querySelector('.trend') as HTMLDivElement;
+    this.trendRead = el.querySelector('.trend .rd') as HTMLSpanElement;
+    this.trendBody = el.querySelector('.trend .body') as HTMLDivElement;
     (el.querySelector('.close') as HTMLButtonElement).addEventListener('click', () => this.close());
     (el.querySelector('[data-act="info"]') as HTMLButtonElement).addEventListener('click', () => this.onMoreInfo());
     (el.querySelector('[data-act="vr"]') as HTMLButtonElement).addEventListener('click', () => this.onEnterVR());
@@ -156,6 +175,74 @@ export class SitePopup {
   setLoading() {
     this.feas.className = 'feas';
     this.feas.innerHTML = '<span>Feasibility score:</span><span class="spin" aria-label="computing"></span>';
+    this.setTrend('loading');
+  }
+
+  /**
+   * The feasibility score over the next 30 days under the score: a series from
+   * SiteApi.timeSeries, 'loading' while it is computed, or null to hide it.
+   */
+  setTrend(series: { times: number[]; feasibility: number[] } | 'loading' | null) {
+    this.trend.hidden = series === null;
+    this.trendRead.textContent = '';
+    if (series === null) return;
+    if (series === 'loading') {
+      this.trendBody.innerHTML = '<div class="wait">Computing…</div>';
+      return;
+    }
+    const { times, feasibility: vals } = series;
+    const W = 300, H = 58, PT = 4, PB = 13, PH = H - PT - PB;
+    const t0 = times[0], t1 = times[times.length - 1];
+    const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * W;
+    const y = (v: number) => PT + (1 - v / 100) * PH;
+    const parts: string[] = [];
+    // tier boundaries (sitePopup.scoreTier), recessive
+    for (const g of [40, 70]) parts.push(`<line x1="0" x2="${W}" y1="${y(g).toFixed(1)}" y2="${y(g).toFixed(1)}" stroke="rgba(255,255,255,.1)" stroke-dasharray="3 3"/>`);
+    parts.push(`<line x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}" stroke="rgba(255,255,255,.25)"/>`);
+    // a date label every 5 days (UTC midnights), short enough for the window
+    const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const STEP = (t1 - t0 > 10 * 86400e3 ? 5 : 1) * 86400e3;
+    for (let t = Math.ceil(t0 / STEP) * STEP; t <= t1; t += STEP) {
+      const tx = x(t), day = new Date(t);
+      parts.push(`<line x1="${tx.toFixed(1)}" x2="${tx.toFixed(1)}" y1="${y(0)}" y2="${y(0) + 3}" stroke="rgba(255,255,255,.25)"/>`);
+      if (tx > 14 && tx < W - 14) parts.push(`<text x="${tx.toFixed(1)}" y="${H - 2}" text-anchor="middle">${MON[day.getUTCMonth()]} ${day.getUTCDate()}</text>`);
+    }
+    // the series, coloured by its value at each time (as in the graph panel)
+    let d = '';
+    for (let i = 0; i < vals.length; i++) d += `${i ? 'L' : 'M'}${x(times[i]).toFixed(1)} ${y(vals[i]).toFixed(1)}`;
+    const stops: string[] = [];
+    const every = Math.max(1, Math.ceil(vals.length / 300));
+    for (let i = 0; i < vals.length; i += every) stops.push(`<stop offset="${(x(times[i]) / W).toFixed(4)}" stop-color="${scoreColor(vals[i])}"/>`);
+    stops.push(`<stop offset="1" stop-color="${scoreColor(vals[vals.length - 1])}"/>`);
+    parts.unshift(`<defs><linearGradient id="moon-site-trend" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${W}" y2="0">${stops.join('')}</linearGradient></defs>`);
+    parts.push(`<path d="${d}L${W} ${y(0)}L0 ${y(0)}Z" fill="url(#moon-site-trend)" fill-opacity=".16"/>`);
+    parts.push(`<path d="${d}" fill="none" stroke="url(#moon-site-trend)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+    parts.push(`<line class="cur" y1="${PT}" y2="${y(0)}" stroke="rgba(255,255,255,.55)" visibility="hidden"/>`);
+    parts.push(`<circle class="dot" r="3.5" stroke="#202124" stroke-width="1.5" visibility="hidden"/>`);
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const avg = `avg <b>${Math.round(mean)}%</b>`;
+    this.trendRead.innerHTML = avg;
+    this.trendBody.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" role="img" aria-label="Feasibility over the next 30 days: ` +
+      `now ${Math.round(vals[0])}%, average ${Math.round(mean)}%, min ${Math.round(Math.min(...vals))}%, max ${Math.round(Math.max(...vals))}%">${parts.join('')}</svg>`;
+    const svg = this.trendBody.querySelector('svg') as SVGSVGElement;
+    const cur = svg.querySelector('.cur') as SVGLineElement, dot = svg.querySelector('.dot') as SVGCircleElement;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const hover = (e: PointerEvent) => {
+      const r = svg.getBoundingClientRect();
+      const i = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (vals.length - 1));
+      const px = x(times[i]).toFixed(1), py = y(vals[i]).toFixed(1);
+      cur.setAttribute('x1', px); cur.setAttribute('x2', px); cur.setAttribute('visibility', 'visible');
+      dot.setAttribute('cx', px); dot.setAttribute('cy', py); dot.setAttribute('fill', scoreColor(vals[i]));
+      dot.setAttribute('visibility', 'visible');
+      const dt = new Date(times[i]);
+      this.trendRead.innerHTML = `${MON[dt.getUTCMonth()]} ${dt.getUTCDate()} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())} UTC · <b>${Math.round(vals[i])}%</b>`;
+    };
+    svg.addEventListener('pointermove', hover);
+    svg.addEventListener('pointerdown', hover);
+    svg.addEventListener('pointerleave', () => {
+      cur.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden');
+      this.trendRead.innerHTML = avg;
+    });
   }
 
   setScore(score: number | null) {

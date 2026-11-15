@@ -35,7 +35,7 @@ const SCALE: [score: number, rgb: [number, number, number]][] = [
   [55, [0xfd, 0xe2, 0x6a]],
   [85, [0x5b, 0xd7, 0x7a]],
 ];
-function scoreColor(v: number): string {
+export function scoreColor(v: number): string {
   let i = 0;
   while (i < SCALE.length - 2 && v > SCALE[i + 1][0]) i++;
   const [s0, c0] = SCALE[i], [s1, c1] = SCALE[i + 1];
