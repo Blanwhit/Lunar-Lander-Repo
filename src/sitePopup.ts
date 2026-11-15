@@ -61,9 +61,12 @@ const CSS = `
 @keyframes moon-spin { to { transform: rotate(360deg); } }
 
 .moon-site .btns { display: flex; gap: 10px; }
+/* same look as the surface walk's light button (walk.ts: "Enter headset") */
 .moon-site .btns button { all: unset; flex: 1; box-sizing: border-box; text-align: center; cursor: pointer;
-  padding: 7px 12px; border-radius: 8px; border: 1px solid #8ab4f8; color: #8ab4f8; font-weight: 600; white-space: nowrap; }
-.moon-site .btns button:hover { background: rgba(138, 180, 248, 0.12); }
+  padding: 7px 11px; border-radius: 7px; border: 1px solid #eceef0; background: #eceef0; color: #101113;
+  white-space: nowrap; }
+.moon-site .btns button:hover { background: #ffffff; border-color: #ffffff; }
+.moon-site .btns button:active { background: #d4d7db; border-color: #d4d7db; }
 .moon-site .btns button:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 2px; }
 `;
 

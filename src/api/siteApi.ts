@@ -25,7 +25,7 @@ import { Ephemeris } from '../ephemeris';
 import { R_MOON, latLonToDir, texelSize, type Vec3 } from '../geom';
 import { moonOrientation, type OrientationProvider } from '../orientation';
 import { TileTerrain } from './terrain';
-import { albedo, simulateRegolith } from './thermal';
+import { albedo, simulateRegolith, simulateRegolithSeries } from './thermal';
 import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig, type FeasibilityInputs, type FeasibilityResult } from './feasibility';
 
 // ------------------------------------------------------------------------------- interface
@@ -162,6 +162,32 @@ export interface TemperatureModel {
 export interface SiteApi {
   query(q: SiteQuery): Promise<SiteReport>;
   horizon(lat: number, lon: number, observerHeightM?: number): Promise<HorizonProfile>;
+  /** category and feasibility scores over a time window (see timeSeries below) */
+  timeSeries(q: SiteSeriesQuery): Promise<SiteSeries>;
+}
+
+export interface SiteSeriesQuery {
+  lat: number;
+  lon: number;
+  start: Date | number | string; // UTC
+  spanMs: number; // window length (>= 1 h)
+  observerHeightM?: number;
+  linkMaskDeg?: number;
+  signal?: AbortSignal;
+}
+
+export interface SiteSeries {
+  query: { lat: number; lon: number; startUtc: string; spanMs: number; observerHeightM: number };
+  stepMs: number;
+  /** sample times (ms since epoch, UTC), start .. start + span inclusive */
+  times: number[];
+  /** 0-100 % at each sample, as in SiteReport.feasibility */
+  power: number[];
+  comms: number[];
+  landing: number[];
+  feasibility: number[];
+  temperatureK: number[];
+  computeMs: number;
 }
 
 export interface SiteApiOptions {
@@ -219,6 +245,7 @@ const AU_KM = 149597870.7;
 const SOLAR_CONSTANT_1AU = 1361; // W/m^2
 const H_MAX = 10800; // highest lunar terrain (m vs 1737.4 km)
 const C_KM_S = 299792.458;
+const HIST_DAYS = 88.6; // regolith temperature spin-up (~3 lunations)
 
 const toMs = (t: Date | number | string) => (t instanceof Date ? t.getTime() : typeof t === 'number' ? t : Date.parse(t));
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString().replace('.000Z', 'Z'));
@@ -388,23 +415,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     return null;
   }
 
-  // ---- the query ------------------------------------------------------------------------
-  async function query(q: SiteQuery): Promise<SiteReport> {
-    const t0 = performance.now();
-    const check = () => q.signal?.throwIfAborted();
-    check();
-    await initEphem();
-    check();
-    const ms = clampT(Math.floor(toMs(q.time) / 1000) * 1000);
-    if (!Number.isFinite(ms)) throw new Error('invalid time');
-    const lat = Math.max(-90, Math.min(90, q.lat));
-    const lon = q.lon;
-    const hObs = q.observerHeightM ?? 2;
-    const mask = q.linkMaskDeg ?? 0;
-    const days = q.searchDays ?? 30;
+  // ---- per-site setup shared by query() and timeSeries() -------------------------------
+  /** terrain at the site: elevation, slope (finest tile), local prominence and horizon */
+  async function prepare(lat: number, lon: number, hObs: number, check: () => void) {
     const f = localFrame(lat, lon);
-
-    // elevation + slope (finest available tile)
     const site = await siteHeight(lat, lon);
     check();
     const cell = texelSize(site.level);
@@ -422,18 +436,75 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       [0, 45, 90, 135, 180, 225, 270, 315].map((az) => terrain.sample(dirAt(f, az, PROMINENCE_RING_M), site.level).h));
     const prominence = site.h - ring.reduce((a, b2) => a + b2, 0) / ring.length;
 
-    // horizon + bodies (the horizon scan is the longest synchronous step: check right before)
+    // horizon (the horizon scan is the longest synchronous step: check right before)
     check();
     const hp = await horizon(lat, lon, hObs);
     check();
     const siteKm = f.up.clone().multiplyScalar((R_MOON + site.h + hObs) / 1000);
-    const geo = async (t: number) => {
-      const bodies = await bodiesFrom(t, siteKm);
-      return { sun: geometry(bodies.sun, R_SUN_KM, f, hp), earth: geometry(bodies.earth, R_EARTH_KM, f, hp), raw: bodies };
+    return { f, site, cell, baseline: b, slopeDeg, aspect, normal, prominence, hp, siteKm };
+  }
+  type SiteCtx = Awaited<ReturnType<typeof prepare>>;
+
+  function geoFns({ f, hp, siteKm }: SiteCtx) {
+    return {
+      geo: async (t: number) => {
+        const bodies = await bodiesFrom(t, siteKm);
+        return { sun: geometry(bodies.sun, R_SUN_KM, f, hp), earth: geometry(bodies.earth, R_EARTH_KM, f, hp), raw: bodies };
+      },
+      // one body only (the rise/set searches evaluate thousands of times)
+      sunGeo: async (t: number) => geometry((await bodiesFrom(t, siteKm)).sun, R_SUN_KM, f, hp),
+      earthGeo: async (t: number) => geometry((await bodiesFrom(t, siteKm)).earth, R_EARTH_KM, f, hp),
     };
-    // one body only (the rise/set searches evaluate thousands of times)
-    const sunGeo = async (t: number) => geometry((await bodiesFrom(t, siteKm)).sun, R_SUN_KM, f, hp);
-    const earthGeo = async (t: number) => geometry((await bodiesFrom(t, siteKm)).earth, R_EARTH_KM, f, hp);
+  }
+  type Geo = Awaited<ReturnType<ReturnType<typeof geoFns>['geo']>>;
+
+  /** solar flux absorbed by the local ground facet (W/m^2) */
+  function absorbedFlux(g: Geo, normal: Vector3): number {
+    const ci = g.raw.sun.clone().normalize().dot(normal);
+    if (!(ci > 0 && g.sun.visibleFraction > 0)) return 0;
+    const fluxT = SOLAR_CONSTANT_1AU * (AU_KM / g.raw.sun.length()) ** 2;
+    const iDeg = Math.acos(Math.min(1, ci)) / DEG;
+    return (1 - albedo(iDeg)) * fluxT * ci * g.sun.visibleFraction;
+  }
+
+  /**
+   * Feasibility "annual" statistics over the fixed reference year (6 h samples); they don't
+   * depend on the query time, so they are cached per site like the horizon.
+   */
+  async function refYear(lat: number, lon: number, hObs: number, mask: number, geo: (t: number) => Promise<Geo>) {
+    const refKey = `${lat.toFixed(7)},${lon.toFixed(7)},${hObs},${mask}`;
+    let ref = refYearCache.get(refKey);
+    if (!ref) {
+      let s = 0, e = 0, n = 0;
+      for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
+        const g = await geo(t);
+        n++;
+        s += g.sun.visibleFraction;
+        if (g.earth.marginDeg - mask > 0) e++;
+      }
+      ref = { sun: s, earth: e, n };
+      refYearCache.set(refKey, ref);
+    }
+    return ref;
+  }
+
+  // ---- the query ------------------------------------------------------------------------
+  async function query(q: SiteQuery): Promise<SiteReport> {
+    const t0 = performance.now();
+    const check = () => q.signal?.throwIfAborted();
+    check();
+    await initEphem();
+    check();
+    const ms = clampT(Math.floor(toMs(q.time) / 1000) * 1000);
+    if (!Number.isFinite(ms)) throw new Error('invalid time');
+    const lat = Math.max(-90, Math.min(90, q.lat));
+    const lon = q.lon;
+    const hObs = q.observerHeightM ?? 2;
+    const mask = q.linkMaskDeg ?? 0;
+    const days = q.searchDays ?? 30;
+    const ctx = await prepare(lat, lon, hObs, check);
+    const { f, site, cell, baseline: b, slopeDeg, aspect, normal, prominence, hp } = ctx;
+    const { geo, sunGeo, earthGeo } = geoFns(ctx);
     const now = await geo(ms);
     const { sun, earth } = now;
 
@@ -491,25 +562,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       centreFraction: total ? centre / total : 0,
     };
 
-    // feasibility "annual" statistics over the fixed reference year (6 h samples); they don't
-    // depend on the query time, so they are cached per site like the horizon
-    const refKey = `${lat.toFixed(7)},${lon.toFixed(7)},${hObs},${mask}`;
-    let ref = refYearCache.get(refKey);
-    if (!ref) {
-      let s = 0, e = 0, n = 0;
-      for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
-        const g = await geo(t);
-        n++;
-        s += g.sun.visibleFraction;
-        if (g.earth.marginDeg - mask > 0) e++;
-      }
-      ref = { sun: s, earth: e, n };
-      refYearCache.set(refKey, ref);
-    }
-    const { sun: refSun, earth: refEarth, n: refN } = ref;
+    const { sun: refSun, earth: refEarth, n: refN } = await refYear(lat, lon, hObs, mask, geo);
 
     // absorbed-flux history on the local ground facet (30 min steps, ~3 lunations back)
-    const HIST_STEP = 1800, HIST_DAYS = 88.6;
+    const HIST_STEP = 1800;
     const t0h = clampT(ms - HIST_DAYS * 86400e3);
     const nh = Math.max(2, Math.round((ms - t0h) / (HIST_STEP * 1000)) + 1);
     const hist = new Float64Array(nh);
@@ -517,14 +573,8 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     for (let k = 0; k < nh; k++) {
       const t = ms - (nh - 1 - k) * HIST_STEP * 1000;
       const g = await geo(t);
-      const sd = g.raw.sun.clone().normalize();
-      const ci = sd.dot(normal);
-      const fluxT = SOLAR_CONSTANT_1AU * (AU_KM / g.raw.sun.length()) ** 2;
-      if (ci > 0 && g.sun.visibleFraction > 0) {
-        const iDeg = Math.acos(Math.min(1, ci)) / DEG;
-        hist[k] = (1 - albedo(iDeg)) * fluxT * ci * g.sun.visibleFraction;
-        lastLit = t;
-      }
+      hist[k] = absorbedFlux(g, normal);
+      if (hist[k] > 0) lastLit = t;
     }
     const lit = vf > 0 && cosInc > 0;
     const hoursSince = lit ? null : lastLit === null ? Infinity : (ms - lastLit) / 3600e3;
@@ -623,5 +673,111 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     };
   }
 
-  return { query, horizon };
+  // ---- time series ------------------------------------------------------------------------
+  /**
+   * Power / connectivity / landing / feasibility scores sampled over [start, start + span],
+   * with the same inputs and scoring as query() at each sample. Everything is evaluated on
+   * one uniform grid (30 min .. 3 h, ~400 steps over the span): ~3 lunations of spin-up
+   * before the start for the regolith temperature, and 15 days past the end for the
+   * "hours of Sun / Earth remaining" inputs (their utility saturates at 14 days). Rise/set
+   * times are interpolated linearly between grid samples.
+   */
+  async function timeSeries(q: SiteSeriesQuery): Promise<SiteSeries> {
+    const t0c = performance.now();
+    const check = () => q.signal?.throwIfAborted();
+    check();
+    await initEphem();
+    check();
+    const t0 = clampT(Math.floor(toMs(q.start) / 1000) * 1000);
+    if (!Number.isFinite(t0)) throw new Error('invalid time');
+    const span = Math.max(3600e3, q.spanMs);
+    const lat = Math.max(-90, Math.min(90, q.lat));
+    const lon = q.lon;
+    const hObs = q.observerHeightM ?? 2;
+    const mask = q.linkMaskDeg ?? 0;
+    const SEARCH_DAYS = 30; // query()'s default rise/set window (the "remaining" inputs are capped by it)
+    const LOOKAHEAD_DAYS = 15;
+
+    const ctx = await prepare(lat, lon, hObs, check);
+    const { geo } = geoFns(ctx);
+    const ref = await refYear(lat, lon, hObs, mask, geo);
+    check();
+
+    // grid step: a multiple of the thermal model's 120 s time step
+    const stepS = Math.min(10800, Math.max(1800, Math.round(span / 1000 / 400 / 120) * 120));
+    const step = stepS * 1000;
+    const nWarm = Math.round((HIST_DAYS * 86400e3) / step);
+    const nSpan = Math.ceil(span / step);
+    const nLook = Math.ceil((LOOKAHEAD_DAYS * 86400e3) / step);
+    const n = nWarm + nSpan + 1 + nLook;
+    const sunM = new Float64Array(n), sunF = new Float64Array(n), earthM = new Float64Array(n), earthF = new Float64Array(n);
+    const absorbed = new Float64Array(nWarm + nSpan + 1);
+    const tAt = (k: number) => t0 + (k - nWarm) * step;
+    for (let k = 0; k < n; k++) {
+      if ((k & 255) === 0) check();
+      const g = await geo(clampT(tAt(k)));
+      sunM[k] = g.sun.marginDeg;
+      sunF[k] = g.sun.visibleFraction;
+      earthM[k] = g.earth.marginDeg - mask;
+      earthF[k] = discFractionAbove(earthM[k], g.earth.angularRadiusDeg);
+      if (k < absorbed.length) absorbed[k] = absorbedFlux(g, ctx.normal);
+    }
+    check();
+    const temps = simulateRegolithSeries(absorbed, stepS, nWarm);
+
+    /** hours until margin m turns non-positive, for each plotted sample (0 while it already is) */
+    const remaining = (m: Float64Array) => {
+      const out = new Float64Array(nSpan + 1);
+      let next = -1; // index k of the next crossing (between k and k + 1), scanning backwards
+      for (let k = n - 2; k >= nWarm; k--) {
+        if ((m[k] > 0) !== (m[k + 1] > 0)) next = k;
+        if (k > nWarm + nSpan) continue;
+        if (!(m[k] > 0)) continue; // not visible: 0
+        let h: number;
+        if (next < 0) h = SEARCH_DAYS * 24;
+        else {
+          const tc = tAt(next) + (step * m[next]) / (m[next] - m[next + 1]);
+          h = Math.min(SEARCH_DAYS * 24, Math.max(0, (tc - tAt(k)) / 3600e3));
+        }
+        out[k - nWarm] = h;
+      }
+      return out;
+    };
+    const sunRem = remaining(sunM), earthRem = remaining(earthM);
+
+    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
+    const out: SiteSeries = {
+      query: { lat, lon, startUtc: iso(t0)!, spanMs: span, observerHeightM: hObs },
+      stepMs: step,
+      times: [], power: [], comms: [], landing: [], feasibility: [], temperatureK: [],
+      computeMs: 0,
+    };
+    const r2 = (x: number) => Math.round(x * 100) / 100;
+    for (let i = 0; i <= nSpan; i++) {
+      const k = nWarm + i;
+      const tK = Math.round(temps[i] * 10) / 10;
+      const r = feasibility({
+        sunVisibleNow: sunF[k],
+        sunHoursRemaining: sunRem[i],
+        annualIllumination: ref.n ? ref.sun / ref.n : 0,
+        earthVisibleNow: earthF[k],
+        linkMarginDeg: Math.max(0, earthM[k]),
+        earthHoursRemaining: earthRem[i],
+        annualEarthVisibility: ref.n ? ref.earth / ref.n : 0,
+        slopeDeg: ctx.slopeDeg,
+        temperatureK: tK,
+        prominenceM: ctx.prominence,
+      }, cfg);
+      out.times.push(tAt(k));
+      out.power.push(r2(r.categories.power));
+      out.comms.push(r2(r.categories.comms));
+      out.landing.push(r2(r.categories.landing));
+      out.feasibility.push(r2(r.score));
+      out.temperatureK.push(tK);
+    }
+    out.computeMs = Math.round(performance.now() - t0c);
+    return out;
+  }
+
+  return { query, horizon, timeSeries };
 }

@@ -33,6 +33,8 @@ import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
 import type { SiteReport } from './api/siteApi';
 import { InfoPanel } from './infoPanel';
+import { SiteGraphs } from './siteGraphs';
+import { PoleMarkers } from './poleMarkers';
 import { SitePopup, createHint } from './sitePopup';
 import { SunGlare, sunVisibleFraction } from './sunGlare';
 import { gmst } from './time';
@@ -144,21 +146,62 @@ async function main() {
   let siteQuery: AbortController | null = null; // the running score query (stopped when unneeded)
   // "More info": full site report (power / connectivity / landing) in the top-left corner
   const info = new InfoPanel(document.body);
+  // ...and the site's scores over time on the right (opened and closed with it)
+  const graphs = new SiteGraphs(document.body);
+  let seriesQuery: AbortController | null = null;
+  let seriesKey = ''; // site / time / window of the charts shown or being computed
+  const loadSeries = async (force = false) => {
+    if (!site || !graphs.isOpen) return;
+    const key = `${site.lat},${site.lon},${simMs},${graphs.span.ms}`;
+    if (!force && key === seriesKey) return;
+    seriesKey = key;
+    seriesQuery?.abort();
+    const abort = (seriesQuery = new AbortController());
+    graphs.setLoading();
+    try {
+      const api = await (window as any).__moon.siteApi();
+      const s = await api.timeSeries({ lat: site.lat, lon: site.lon, start: simMs, spanMs: graphs.span.ms, signal: abort.signal });
+      if (!abort.signal.aborted) graphs.setSeries(s);
+    } catch (e) {
+      if (abort.signal.aborted) return;
+      console.warn('site time series', e);
+      seriesKey = '';
+      graphs.setError();
+    }
+  };
+  const stopSeries = () => {
+    seriesQuery?.abort();
+    seriesQuery = null;
+    seriesKey = '';
+  };
+  graphs.onSpanChange = () => void loadSeries();
+  const setInfoOpen = (open: boolean) => {
+    if (open) {
+      info.show();
+      graphs.show();
+      void loadSeries();
+    } else {
+      info.hide();
+      graphs.hide();
+      stopSeries();
+    }
+  };
+  info.onClose = () => setInfoOpen(false);
   popup.onClose = () => {
     cancelPrep();
     site = null;
     siteToken++;
     siteQuery?.abort();
     siteQuery = null;
-    info.hide();
+    setInfoOpen(false);
+    graphs.clear();
     needsRender = true;
   };
-  popup.onMoreInfo = () => (info.isOpen ? info.hide() : info.show());
+  popup.onMoreInfo = () => setInfoOpen(!info.isOpen);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F3' && site) {
       e.preventDefault();
-      if (info.isOpen) info.hide();
-      else info.show();
+      setInfoOpen(!info.isOpen);
     }
   });
   const scoreSite = async () => {
@@ -168,12 +211,14 @@ async function main() {
     const abort = (siteQuery = new AbortController());
     popup.setLoading();
     info.setLoading(site.lat, site.lon);
+    if (graphs.isOpen) graphs.setLoading();
     try {
       const api = await (window as any).__moon.siteApi();
       const r: SiteReport = await api.query({ lat: site.lat, lon: site.lon, time: simMs, signal: abort.signal });
       if (token === siteToken) {
         popup.setScore(r.feasibility.score);
         info.setReport(r);
+        void loadSeries(); // after the report: both share the site's horizon and annual statistics
       }
     } catch (e) {
       if (abort.signal.aborted) return; // superseded or the popup closed
@@ -203,6 +248,8 @@ async function main() {
       lat: Math.asin(Math.max(-1, Math.min(1, dir.z))) / DEG,
       lon: Math.atan2(dir.y, dir.x) / DEG,
     };
+    stopSeries();
+    graphs.clear();
     popup.show(site.lat, site.lon);
     void scoreSite();
     prefetchWalk(site.lat, site.lon);
@@ -364,6 +411,7 @@ async function main() {
       clearTimeout(siteTimer);
       popup.setLoading();
       info.setLoading(site.lat, site.lon);
+      if (graphs.isOpen) graphs.setLoading();
       siteTimer = window.setTimeout(() => void scoreSite(), 300);
       // the prepared walk is lit for the previous time: prepare it again
       if (prep || prefetchTimer) prefetchWalk(site.lat, site.lon);
@@ -428,6 +476,8 @@ async function main() {
 
   const scene = new Scene();
   const dummyCam = new Camera();
+  // N / S rotation-axis lines (desktop globe only: not in the landing flight or the walk)
+  const poles = new PoleMarkers(document.body);
   let walking = false;
   let advanceFlight: ((dt: number) => void) | undefined;
   let flightFrame: LandingFrame | undefined;
@@ -531,7 +581,10 @@ async function main() {
 
   /** advance controls by dt and draw if anything changed (or when forced) */
   function renderFrame(dt: number, force: boolean) {
-    if (walking) return;
+    if (walking) {
+      poles.hide();
+      return;
+    }
     const moved = !landingBusy && controls.update(dt);
     const fov = 45 * DEG;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
@@ -599,6 +652,9 @@ async function main() {
         scene.add(rocks.group);
       }
     }
+    if (flightFrame) poles.hide();
+    else poles.update(st.camPos, st.viewRot, proj, canvas.clientWidth, canvas.clientHeight,
+      (sign) => tree.heightAt([0, 0, sign]) ?? 0);
     if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
     renderer.render(scene, dummyCam);

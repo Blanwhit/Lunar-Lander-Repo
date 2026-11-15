@@ -30,6 +30,25 @@ export interface ThermalResult {
  * @param sampleS  spacing of `absorbed` in seconds
  */
 export function simulateRegolith(absorbed: Float64Array, sampleS: number): ThermalResult {
+  return run(absorbed, sampleS, absorbed.length);
+}
+
+/**
+ * Surface temperature at every sample from `fromIndex` on (one run over the whole series).
+ * The first `fromIndex` samples are spin-up only: the initial state is the equilibrium with
+ * their mean, so later samples do not influence earlier ones. `sampleS` must be a multiple
+ * of 120 s.
+ */
+export function simulateRegolithSeries(absorbed: Float64Array, sampleS: number, fromIndex: number): Float64Array {
+  const out = new Float64Array(Math.max(0, absorbed.length - fromIndex));
+  run(absorbed, sampleS, Math.max(1, fromIndex), (k, T) => {
+    if (k >= fromIndex) out[k - fromIndex] = T;
+  });
+  return out;
+}
+
+function run(absorbed: Float64Array, sampleS: number, meanCount: number,
+  onSample?: (k: number, surfaceK: number) => void): ThermalResult {
   // grid: 36 nodes, 5 mm at the top growing geometrically to ~2.5 m
   const N = 36;
   const z = new Float64Array(N);
@@ -49,8 +68,9 @@ export function simulateRegolith(absorbed: Float64Array, sampleS: number): Therm
 
   // initial state: long-term equilibrium with the mean absorbed flux (+ geothermal)
   let mean = 0;
-  for (let k = 0; k < absorbed.length; k++) mean += absorbed[k];
-  mean /= Math.max(1, absorbed.length);
+  const nMean = Math.min(meanCount, absorbed.length);
+  for (let k = 0; k < nMean; k++) mean += absorbed[k];
+  mean /= Math.max(1, nMean);
   const t0 = Math.max(Math.pow((mean + Q_GEO) / (EMISSIVITY * SIGMA), 0.25) * 0.86, 20);
   const T = new Float64Array(N).fill(t0);
   // per-interface constants: mean conductivity and node spacing between nodes i and i + 1
@@ -67,7 +87,10 @@ export function simulateRegolith(absorbed: Float64Array, sampleS: number): Therm
   const total = (absorbed.length - 1) * sampleS;
   const dt = 120; // s (stable for the top cell incl. radiative stiffness)
   const last = absorbed.length - 1;
-  for (let t = 0; t < total; t += dt) {
+  const perSample = Math.max(1, Math.round(sampleS / dt));
+  let step = 0;
+  for (let t = 0; t < total; t += dt, step++) {
+    if (onSample && step % perSample === 0) onSample(step / perSample, T[0]);
     const x = t / sampleS, k = Math.floor(x), f = x - k;
     const F = absorbed[k] * (1 - f) + absorbed[Math.min(k + 1, last)] * f;
     // each interface flux once (it enters one node and leaves the other)
@@ -88,6 +111,7 @@ export function simulateRegolith(absorbed: Float64Array, sampleS: number): Therm
       T[i] = Math.max(3, Ti + (dt * q) / (rw[i] * Math.max(c, 5)));
     }
   }
+  onSample?.(last, T[0]);
   let deep = T[N - 1];
   for (let i = 0; i < N; i++) if (z[i] >= 0.5) { deep = T[i]; break; }
   return { surfaceK: T[0], deepK: deep };
