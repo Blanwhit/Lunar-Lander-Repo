@@ -34,6 +34,7 @@ import { moonOrientation } from './orientation';
 import type { SiteReport } from './api/siteApi';
 import { InfoPanel } from './infoPanel';
 import { SiteGraphs } from './siteGraphs';
+import { PoleMarkers } from './poleMarkers';
 import { SitePopup, createHint } from './sitePopup';
 import { SunGlare, sunVisibleFraction } from './sunGlare';
 import { gmst } from './time';
@@ -482,6 +483,8 @@ async function main() {
 
   const scene = new Scene();
   const dummyCam = new Camera();
+  // N / S rotation-axis lines (desktop globe only: not in the landing flight or the walk)
+  const poles = new PoleMarkers(document.body);
   let walking = false;
   let advanceFlight: ((dt: number) => void) | undefined;
   let flightFrame: LandingFrame | undefined;
@@ -585,7 +588,10 @@ async function main() {
 
   /** advance controls by dt and draw if anything changed (or when forced) */
   function renderFrame(dt: number, force: boolean) {
-    if (walking) return;
+    if (walking) {
+      poles.hide();
+      return;
+    }
     const moved = flightFrame ? !!advanceFlight : controls.update(dt);
     const fov = (flightFrame?.fov ?? 45) * DEG;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
@@ -653,6 +659,9 @@ async function main() {
         scene.add(rocks.group);
       }
     }
+    if (flightFrame) poles.hide();
+    else poles.update(st.camPos, st.viewRot, proj, canvas.clientWidth, canvas.clientHeight,
+      (sign) => tree.heightAt([0, 0, sign]) ?? 0);
     if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
     renderer.render(scene, dummyCam);
