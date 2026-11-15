@@ -198,6 +198,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   scene.add(rig);
 
   // Earthshine fills terrain shadows enough to navigate a landing on the night side.
+  // The Sun is the real one for the selected time; direct sunlight also fades out while the
+  // disc is hidden from the eye by terrain (crater rims, massifs; see SurfaceSunGlare).
   let site:WalkSite=options;
   const sun = options.sun.clone().normalize();
   const fill=new HemisphereLight(0xc7cddc,0x878991,sun.y>0?.28:.55);
@@ -219,6 +221,14 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const glare = new SurfaceSunGlare();
   scene.add(glare.mesh);
   const glareEye = new Vector3(), glareLook = new Vector3();
+  /** direct sunlight and fill from the Sun's elevation and how much of it the eye can see */
+  function applySunlight() {
+    const lit = sun.y > -0.005 ? glare.visibility : 0;
+    sunlight.intensity = 2.5 * lit;
+    fill.intensity = .55 - .27 * lit;
+  }
+  glare.prime(new Vector3(0, site.height(0, 0) + eyeHeight, 0), sun, site.sunAngularRadius ?? 0.00465, site.height);
+  applySunlight();
   let ground: WalkGround;
   let suit: WalkSuit;
   async function groundFor(at:WalkSite,x:number,z:number) {
@@ -339,9 +349,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   function updateLighting(at:WalkSite) {
     sky.removeFromParent();sky.geometry.dispose();sky.material.dispose();
     sun.copy(at.sun).normalize();sky=createSky(at,sun);scene.add(sky);
-    fill.intensity=sun.y>0?.28:.55;
-    sunlight.intensity=sun.y>-.005?2.5:0;
-    sunlight.castShadow=renderer.shadowMap.enabled=sunlight.intensity>0;
+    sunlight.castShadow=renderer.shadowMap.enabled=sun.y>-.005;
+    applySunlight();
     shadowX=shadowZ=Infinity;
   }
   async function travelTo(hit:Vector3) {
@@ -811,6 +820,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     camera.getWorldPosition(glareEye);
     camera.getWorldDirection(glareLook);
     glare.update(glareEye, sun, site.sunAngularRadius ?? 0.00465, site.height, glareLook, dt);
+    applySunlight();
     renderer.render(scene, camera);
   }
 }
