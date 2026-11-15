@@ -7,7 +7,7 @@ endif
 MAX_LEVEL ?= 11
 WORKERS ?= 24
 
-.PHONY: all venv download pack unpack inspect basisu feasibility tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
+.PHONY: all venv download pack unpack transcode-heights inspect basisu feasibility tiles overviews heights colour stars meta stats ephem earth web build serve clean-tiles
 
 all: tiles build
 
@@ -23,6 +23,10 @@ pack:
 # restore the exact original raw files (needed before overviews/heights/colour/stars)
 unpack:
 	$(PY) -I pipeline/pack_raw.py unpack
+
+# convert an existing MLH1 height pyramid and the walk grids to the smaller lossless codec (bit-exact)
+transcode-heights:
+	$(PY) -I pipeline/transcode_heights.py
 
 inspect:
 	$(PY) -I pipeline/inspect_data.py

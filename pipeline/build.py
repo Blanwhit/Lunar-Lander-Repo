@@ -94,11 +94,11 @@ def _build_one(key):
 
 
 def decode_header(blob: bytes):
-    import zlib
-    from moonlod.heights import HEADER
-    d = zlib.decompressobj()
-    raw = d.decompress(blob, HEADER.size)
-    f = HEADER.unpack_from(raw, 0)
+    """child mask and height range from a tile header; None for another format (rebuilt)"""
+    from moonlod.heights import HEADER, MAGIC
+    f = HEADER.unpack_from(blob, 0)
+    if f[0] != MAGIC:
+        return {"child_mask": None, "hmin": None, "hmax": None}, None
     return {"child_mask": f[3], "hmin": f[8], "hmax": f[9]}, None
 
 
@@ -409,7 +409,7 @@ def cmd_meta(args) -> None:
     for p in (OUT / "h").iterdir() if (OUT / "h").exists() else []:
         max_level = max(max_level, int(p.name))
     meta = {
-        "format": "MLH1",
+        "format": "MLH2",
         "maxLevel": max_level,
         "colourMaxLevel": max((int(p.name) for p in (OUT / "c").iterdir()), default=0) if (OUT / "c").exists() else 0,
         "tileN": geom.TILE_N,

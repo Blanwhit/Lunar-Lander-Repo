@@ -1,10 +1,9 @@
 """Height-tile construction and encoding.
 
-File format (`tiles/h/{L}/{face}/{y}/{x}.bin`) -- the whole file is a zlib stream
-(decoded in the browser with DecompressionStream('deflate')):
+File format (`tiles/h/{L}/{face}/{y}/{x}.bin`), little-endian:
 
     off  type      field
-    0    char[4]   magic "MLH1"
+    0    char[4]   magic "MLH2"
     4    u8        level
     5    u8        face
     6    u8        child mask (bit i set -> child i exists; i = (cy << 1) | cx)
@@ -17,21 +16,21 @@ File format (`tiles/h/{L}/{face}/{y}/{x}.bin`) -- the whole file is a zlib strea
     28   f32       base   (m)   height = base + q * step
     32   u16       grid size G (= 259)
     34   u16       reserved
-    36   u8[G*G]   low bytes  \\  of zigzag(q - pred), pred = left + up - upleft
-    ...  u8[G*G]   high bytes /   (row-major; first row/col predict from left/up)
+    36   ...       G x G unsigned 16-bit q, row-major, as a moonlod.gridcodec block
+                   (lossless; decoded in the browser by web/src/terrain/gridCodec.ts)
 
 All heights are metres relative to the 1737.4 km sphere.
 """
 from __future__ import annotations
 
 import struct
-import zlib
 
 import numpy as np
 
+from .gridcodec import decode_grid, encode_grid
 from .geom import dirs_to_latlon, face_dirs, height_ab, local_cell, tile_cell_size, tile_probe
 
-MAGIC = b"MLH1"
+MAGIC = b"MLH2"
 HEADER = struct.Struct("<4sBBBBIIffffHH")
 
 
@@ -83,42 +82,24 @@ def encode(level: int, face: int, x: int, y: int, h: np.ndarray, child_mask: int
     base = np.floor(lo / step) * step
     q = np.round((h.astype(np.float64) - base) / step).astype(np.int64)
     assert q.min() >= 0 and q.max() <= 65535
-    # planar prediction (mod 2^16)
-    pred = np.zeros_like(q)
-    pred[0, 1:] = q[0, :-1]
-    pred[1:, 0] = q[:-1, 0]
-    pred[1:, 1:] = q[1:, :-1] + q[:-1, 1:] - q[:-1, :-1]
-    r = ((q - pred) & 0xFFFF).astype(np.uint16).view(np.int16).astype(np.int32)
-    z = ((r << 1) ^ (r >> 15)) & 0xFFFF
-    z = z.astype(np.uint16)
-    payload = (z & 0xFF).astype(np.uint8).tobytes() + (z >> 8).astype(np.uint8).tobytes()
     hdr = HEADER.pack(MAGIC, level, face, child_mask, 0, x, y, hmin, hmax, step, base, G, 0)
-    return zlib.compress(hdr + payload, 9)
+    return hdr + encode_grid(q)
+
+
+def decode_q(blob: bytes) -> tuple[dict, np.ndarray]:
+    """header fields and the quantised grid q (uint16); heights are base + q * step"""
+    f = HEADER.unpack_from(blob, 0)
+    meta = dict(zip(["magic", "level", "face", "child_mask", "flags", "x", "y", "hmin", "hmax", "step", "base", "G", "_"], f))
+    if meta["magic"] != MAGIC:
+        raise ValueError(f"not an {MAGIC.decode()} tile")
+    G = meta["G"]
+    q = decode_grid(memoryview(blob)[HEADER.size:], G, G, signed=False)
+    return meta, q.astype(np.uint16)
 
 
 def decode(blob: bytes) -> tuple[dict, np.ndarray]:
-    raw = zlib.decompress(blob)
-    f = HEADER.unpack_from(raw, 0)
-    meta = dict(zip(["magic", "level", "face", "child_mask", "flags", "x", "y", "hmin", "hmax", "step", "base", "G", "_"], f))
-    G = meta["G"]
-    n = G * G
-    lo = np.frombuffer(raw, np.uint8, n, HEADER.size).astype(np.int32)
-    hi = np.frombuffer(raw, np.uint8, n, HEADER.size + n).astype(np.int32)
-    z = (lo | (hi << 8)).reshape(G, G)
-    r = (z >> 1) ^ -(z & 1)
-    q = np.zeros((G, G), np.int64)
-    for j in range(G):
-        for i in range(G):
-            if i == 0 and j == 0:
-                p = 0
-            elif j == 0:
-                p = q[0, i - 1]
-            elif i == 0:
-                p = q[j - 1, 0]
-            else:
-                p = q[j, i - 1] + q[j - 1, i] - q[j - 1, i - 1]
-            q[j, i] = (p + r[j, i]) & 0xFFFF
-    return meta, (meta["base"] + q * meta["step"]).astype(np.float32)
+    meta, q = decode_q(blob)
+    return meta, (meta["base"] + q.astype(np.float64) * meta["step"]).astype(np.float32)
 
 
 def tile_wanted(sources, cfg: dict, level: int, face: int, x: int, y: int) -> bool:

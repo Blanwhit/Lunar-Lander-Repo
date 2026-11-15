@@ -55,6 +55,45 @@ build uses the 128 ppd grid for ±60°. To go higher, add the 512 ppd tiles to `
 32 are under 1.5 GB each) and list them as a source in `config.json`. The pipeline handles any
 equirectangular PDS product, but the 32 tiles would need multi-tile support.
 
+**Higher-resolution options.** The archives above have finer grids than this build uses. File
+sizes were read from the MIT mirror (`http://imbrium.mit.edu/DATA/`) on 2026-11-14.
+
+Tile counts come from the pipeline's own refinement rule (`heights.child_mask`, refine factor
+1.5, `max_level` 11). The same rule reproduces today's 65,070 tiles exactly. Storage assumes
+today's average `MLH2` tile size per level. With the older `MLH1` encoding each figure would be
+about 27% larger.
+
+| Option | Files to add | Raw download | Height tiles | Tile storage | Resolution gained |
+|---|---|---:|---:|---:|---|
+| current build | — | — | 65,070 | 2.04 GB | 167 m below 60°; 83/42/21 m polar; 5 m ≤87.5°S |
+| SLDEM2015 256 ppd | `SLDEM2015/TILES/FLOAT_IMG/SLDEM2015_256_*_FLOAT.IMG` (6 × 1.89 GB) | 11.3 GB | 97,422 | 2.96 GB (+0.9) | ~83 m (L7) within ±60° |
+| SLDEM2015 512 ppd | `SLDEM2015_512_*_FLOAT.IMG` (32 × 1.42 GB; lossy JP2: 5.4 GB) | 45.3 GB | 244,910 | 6.94 GB (+4.9) | ~42 m (L8) within ±60° |
+| LOLA polar upgrades | `LOLA_GDR/POLAR/IMG/`: `LDEM_45{N,S}_100M`, `LDEM_60{N,S}_60M`, `LDEM_75{N,S}_30M`, `LDEM_80N_20M`, `LDEM_85{N,S}_10M`, `LDEM_875N_5M` (1.66–1.93 GB each) | 18.3 GB | 170,494 | 5.42 GB (+3.4) | L7 from 45°, L8 from 60°, L9 (21 m) from 75°, L10 from 85°, and the north pole reaches L11 (5 m) like the south |
+| SLDEM 512 + polar | both of the above | 63.6 GB | 332,382 | 9.83 GB (+7.8) | all of the above |
+
+Tiles per level, L6–L11 (L0–L5 are unchanged: 6, 24, 96, 384, 1,536, 6,144):
+
+| Option | L6 | L7 | L8 | L9 | L10 | L11 |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 12,896 | 7,520 | 12,288 | 10,704 | 2,800 | 10,672 |
+| + SLDEM 256 | 24,576 | 28,192 | 12,288 | 10,704 | 2,800 | 10,672 |
+| + SLDEM 512 | 24,576 | 94,464 | 93,504 | 10,704 | 2,800 | 10,672 |
+| + polar | 12,896 | 29,312 | 29,824 | 47,584 | 21,344 | 21,344 |
+| + SLDEM 512 + polar | 24,576 | 98,304 | 111,040 | 47,584 | 21,344 | 21,344 |
+
+Notes:
+
+* The global LOLA grids `LDEM_128` (2.1 GB), `LDEM_256` (4 × 2.1 GB) and `LDEM_512`
+  (16 × 2.1 GB = 34 GB) also exist. Within ±60° they are interpolated between LOLA tracks, so
+  SLDEM2015 is the better choice there.
+* The polar upgrades are single files of the kind the pipeline already reads. Add them to
+  `sources.json` and `config.json` with a `polar_flip` check (`inspect_data.py`) and despiking.
+* The SLDEM tiles are split by latitude and longitude, so they need multi-tile support first (see
+  above).
+* `make pack` roughly halves the space the raw files take on disk: int16 to ~45%, float32 to ~63%.
+* The VR walk's online LOLA grid (ArcGIS, ~167 m) is a separate service and not part of these
+  numbers.
+
 **Verification.** [pipeline/inspect_data.py](pipeline/inspect_data.py) writes
 `data/inspect/report.json`.
 

@@ -50,6 +50,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ephemeris import iau_moon, tdb_minus_utc_s  # noqa: E402
 from moonlod import geom  # noqa: E402
+from moonlod.heights import decode_q  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TILES = ROOT / "web" / "public" / "tiles"
@@ -73,16 +74,9 @@ def texel(level):
 
 
 # ------------------------------------------------------------------ tile store
-def decode_mlh1(blob: bytes):
-    raw = zlib.decompress(blob)
-    L, f, cm, _, x, y, hmin, hmax, step, base, G, _ = struct.unpack_from("<4xBBBBIIffffHH", raw, 0)
-    n = G * G
-    lo = np.frombuffer(raw, np.uint8, n, 36).astype(np.int64)
-    hi = np.frombuffer(raw, np.uint8, n, 36 + n).astype(np.int64)
-    z = (lo | (hi << 8)).reshape(G, G)
-    r = (z >> 1) ^ -(z & 1)
-    q = (np.cumsum(np.cumsum(r, axis=0), axis=1) & 0xFFFF).astype(np.uint16)  # planar predictor inverse
-    return L, f, cm, x, y, step, base, q
+def decode_mlh2(path: Path):
+    meta, q = decode_q(path.read_bytes())
+    return meta["step"], meta["base"], q
 
 
 def build_store(max_global: int, polar_lat: float, max_polar: int) -> dict:
@@ -113,15 +107,16 @@ def build_store(max_global: int, polar_lat: float, max_polar: int) -> dict:
     base = np.zeros(n, np.float64)
     step = np.zeros(n, np.float64)
     tables = {}
-    for i, (L, f, xx, yy, p) in enumerate(keys):
-        _, _, _, _, _, st, bs, q = decode_mlh1(p.read_bytes())
-        stack[i] = q
-        base[i], step[i] = bs, st
-        if L not in tables:
-            tables[L] = np.full((6, 1 << L, 1 << L), -1, np.int32)
-        tables[L][f, yy, xx] = i
-        if (i + 1) % 5000 == 0:
-            print(f"  decoded {i + 1}/{n}", flush=True)
+    with Pool(os.cpu_count()) as pool:  # the pure-Python tile decoder is the slow part
+        decoded = pool.imap(decode_mlh2, [k[4] for k in keys], chunksize=16)
+        for i, ((L, f, xx, yy, p), (st, bs, q)) in enumerate(zip(keys, decoded)):
+            stack[i] = q
+            base[i], step[i] = bs, st
+            if L not in tables:
+                tables[L] = np.full((6, 1 << L, 1 << L), -1, np.int32)
+            tables[L][f, yy, xx] = i
+            if (i + 1) % 5000 == 0:
+                print(f"  decoded {i + 1}/{n}", flush=True)
     stack.flush()
     del stack
     np.save(CACHE / "feas_base.npy", base)

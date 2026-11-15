@@ -1,4 +1,4 @@
-"""Export compact whole-Moon and landing-site height grids from the built MLH1 pyramid.
+"""Export compact whole-Moon and landing-site height grids from the built MLH2 pyramid.
 
 Run after make tiles with the repository's Python environment. All heights are metres
 relative to the same LOLA reference sphere as the orbital viewer. Walking patches use
@@ -7,47 +7,38 @@ a tangent-plane (gnomonic) projection with positive x east and positive z south.
 from __future__ import annotations
 
 import json
-import zlib
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
 from moonlod import geom
-from moonlod.heights import HEADER
+from moonlod.gridcodec import encode_grid
+from moonlod.heights import decode
 
 ROOT = Path(__file__).resolve().parents[1]
 TILES = ROOT / "web/public/tiles/h"
 OUT = ROOT / "web/public/walk-terrain"
 GLOBAL_LEVEL = 2
+GRID_MAGIC = b"MWG2"  # file = magic + moonlod.gridcodec block of signed q (web/src/walkTerrain.ts)
 
 
 @lru_cache(maxsize=64)
 def read_tile(level: int, face: int, x: int, y: int) -> np.ndarray:
-    raw = zlib.decompress((TILES / str(level) / str(face) / str(y) / f"{x}.bin").read_bytes())
-    magic, l, f, _, _, tx, ty, _, _, step, base, grid, _ = HEADER.unpack_from(raw)
-    if (magic, l, f, tx, ty, grid) != (b"MLH1", level, face, x, y, geom.GRID):
+    meta, values = decode((TILES / str(level) / str(face) / str(y) / f"{x}.bin").read_bytes())
+    if (meta["level"], meta["face"], meta["x"], meta["y"], meta["G"]) != (level, face, x, y, geom.GRID):
         raise ValueError(f"Invalid tile at {level}/{face}/{y}/{x}")
-    lo, hi = np.frombuffer(raw, np.uint8, offset=HEADER.size).reshape(2, grid, grid).astype(np.int32)
-    zig = lo | hi << 8
-    diff = (zig >> 1) ^ -(zig & 1)
-    values = diff.cumsum(axis=1).cumsum(axis=0) & 65535
-    return np.asarray(base + step * values, dtype=np.float32)
+    return values
 
 
 def write_grid(filename: str, values: np.ndarray, step: float = 1, offset: int | None = None) -> dict:
-    """Losslessly delta-code signed, quantized heights for the browser's deflate decoder."""
+    """Quantize heights to signed 16-bit q = (h - offset) / step and store them losslessly."""
     if offset is None:
         offset = int(np.rint((float(values.min()) + float(values.max())) / 2))
     q = np.rint((values - offset) / step).astype(np.int32)
     if q.min() < -32768 or q.max() > 32767:
         raise ValueError(f"height range exceeds signed int16 for {filename}")
-    diff = np.diff(q, axis=1, prepend=np.zeros_like(q[:, :1]))
-    diff = np.diff(diff, axis=0, prepend=np.zeros_like(diff[:1]))
-    diff = ((diff + 32768) % 65536) - 32768
-    zig = ((diff << 1) ^ (diff >> 15)).astype(np.uint16)
-    planes = np.stack((zig & 255, zig >> 8)).astype(np.uint8)
-    (OUT / filename).write_bytes(zlib.compress(planes.tobytes(), 9))
+    (OUT / filename).write_bytes(GRID_MAGIC + encode_grid(q))
     return {"file": filename, "width": q.shape[1], "step": step, "offset": offset}
 
 
