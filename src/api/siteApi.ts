@@ -39,6 +39,8 @@ export interface SiteQuery {
   linkMaskDeg?: number;
   /** how far ahead (and back) to search for rise/set events (days); default 30 */
   searchDays?: number;
+  /** abandon the query (rejects with an AbortError) between its stages */
+  signal?: AbortSignal;
 }
 
 export interface BodyGeometry {
@@ -389,7 +391,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   // ---- the query ------------------------------------------------------------------------
   async function query(q: SiteQuery): Promise<SiteReport> {
     const t0 = performance.now();
+    const check = () => q.signal?.throwIfAborted();
+    check();
     await initEphem();
+    check();
     const ms = clampT(Math.floor(toMs(q.time) / 1000) * 1000);
     if (!Number.isFinite(ms)) throw new Error('invalid time');
     const lat = Math.max(-90, Math.min(90, q.lat));
@@ -401,6 +406,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
 
     // elevation + slope (finest available tile)
     const site = await siteHeight(lat, lon);
+    check();
     const cell = texelSize(site.level);
     const b = 2 * cell;
     const hs = await terrain.until(() => [0, 90, 180, 270].map((az) => terrain.sample(dirAt(f, az, b), site.level).h));
@@ -416,8 +422,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       [0, 45, 90, 135, 180, 225, 270, 315].map((az) => terrain.sample(dirAt(f, az, PROMINENCE_RING_M), site.level).h));
     const prominence = site.h - ring.reduce((a, b2) => a + b2, 0) / ring.length;
 
-    // horizon + bodies
+    // horizon + bodies (the horizon scan is the longest synchronous step: check right before)
+    check();
     const hp = await horizon(lat, lon, hObs);
+    check();
     const siteKm = f.up.clone().multiplyScalar((R_MOON + site.h + hObs) / 1000);
     const geo = async (t: number) => {
       const bodies = await bodiesFrom(t, siteKm);
@@ -450,6 +458,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     // power
     const sunMargin = async (t: number) => (await sunGeo(t)).marginDeg;
     const sunUp = sun.marginDeg > 0;
+    check();
     const nextSunEvent = await findCrossing(sunMargin, ms, days, 1);
     let sunRise = !sunUp ? nextSunEvent : null, sunSet = sunUp ? nextSunEvent : null;
     if (nextSunEvent !== null) {
@@ -466,6 +475,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     const cosInc = sunDir.dot(normal);
     const onTerrain = flux * vf * Math.max(0, cosInc);
 
+    check();
     // illumination over the next year (6 h samples)
     let anyPart = 0, centre = 0, meanFrac = 0, total = 0;
     for (let t = ms; t < clampT(ms + 365 * 86400e3); t += 6 * 3600e3) {

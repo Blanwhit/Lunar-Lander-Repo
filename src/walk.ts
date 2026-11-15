@@ -47,6 +47,12 @@ export interface WalkOptions extends WalkSite {
   onPrepared: (draw: (entry: LandingFrame) => void) => void;
   onArrived: () => void;
   onExit: () => void;
+  /** Optional gate: the walk is built and warmed up (hidden) right away, then waits for this.
+   *  true starts the landing (onPrepared); false discards the prepared walk without onExit. */
+  start?: Promise<boolean>;
+  /** Optional: resolves when a long GPU step (a big texture upload, shader linking) would not
+   *  show as a dropped frame, i.e. nothing is animating. The preparation waits on it. */
+  quiet?: () => Promise<void>;
 }
 
 const eyeHeight = 1.65;
@@ -139,7 +145,7 @@ function nextTask() {
 
 /** Upload the scene's textures one per task: the first render would otherwise upload them all
  *  in one long frame, stalling the orbital landing flight that runs meanwhile. */
-async function uploadTextures(renderer: WebGLRenderer, scene: Scene) {
+async function uploadTextures(renderer: WebGLRenderer, scene: Scene, pause: () => Promise<void>) {
   const textures = new Set<Texture>();
   const add = (value: unknown) => { if (value instanceof Texture) textures.add(value); };
   scene.traverse(object => {
@@ -151,15 +157,15 @@ async function uploadTextures(renderer: WebGLRenderer, scene: Scene) {
     }
   });
   for (const texture of textures) {
+    await pause();
     renderer.initTexture(texture);
-    await nextTask();
   }
 }
 
 /** Draw the scene a few parts at a time, a task each, so the buffer uploads of the first frame
  *  are spread out too (the surface overlay is still transparent here). Lights stay on, so the
  *  programs compiled by compileAsync are the ones used. */
-async function warmUp(renderer: WebGLRenderer, scene: Scene, camera: PerspectiveCamera) {
+async function warmUp(renderer: WebGLRenderer, scene: Scene, camera: PerspectiveCamera, pause: () => Promise<void>) {
   const units: Object3D[] = [];
   for (const child of scene.children) {
     if (!child.visible || (child as Light).isLight) continue;
@@ -169,11 +175,11 @@ async function warmUp(renderer: WebGLRenderer, scene: Scene, camera: Perspective
   for (const unit of units) unit.visible = false;
   try {
     for (let i = 0; i < units.length; i += 6) {
+      await pause();
       const batch = units.slice(i, i + 6);
       for (const unit of batch) unit.visible = true;
       renderer.render(scene, camera);
       for (const unit of batch) unit.visible = false;
-      await nextTask();
     }
   } finally {
     for (const unit of units) unit.visible = true;
@@ -239,7 +245,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   async function groundFor(at:WalkSite,x:number,z:number) {
     const [rocks,soil,atlas]=await preloadSurface();
     const field = new BoulderField(atlas, at.seed, at.height.coordinates);
-    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,true,field);
+    // built by prepareLanding (sliced, so a flight animating meanwhile keeps its frame rate)
+    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,field);
     try {await next.prepareLanding(x,z);return next;}
     catch(error){next.dispose();throw error;}
   }
@@ -284,6 +291,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   overlay.append(style, canvas, bar);
   overlay.style.opacity = '0';
   overlay.inert = true;
+  overlay.style.pointerEvents = 'none'; // may sit prepared over the globe before the landing
+  let engaged = !options.start; // keys belong to the globe until the landing starts
   bar.hidden = true;
   container.appendChild(overlay);
   const enter = bar.querySelector<HTMLButtonElement>('.walk-enter')!;
@@ -486,7 +495,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   function visibilityChanged() {
     if (activeSession ? activeSession.visibilityState !== 'visible' : document.hidden) suspendTools();
-    else audio.start();
+    else if (engaged) audio.start();
   }
   window.addEventListener('blur', suspendTools, listener);
   window.addEventListener('focus', visibilityChanged, listener);
@@ -530,6 +539,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }, listener);
   forward.addEventListener('lostpointercapture', () => { touchForward = false; }, listener);
   window.addEventListener('keydown', e => {
+    if (!engaged) return;
     if (!document.hidden) audio.start();
     if (e.metaKey || e.ctrlKey || e.altKey || activeSession) return;
     if (e.code === 'Escape') { void leave(); return; }
@@ -640,7 +650,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       pendingSession = false;
     }
   }
-  async function leave() {
+  async function leave(notify = true) {
     if (closed) return;
     closed = true;
     abort.abort();
@@ -662,7 +672,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     renderer.dispose();
     renderer.forceContextLoss();
     overlay.remove();
-    options.onExit();
+    if (notify) options.onExit();
   }
   renderer.xr.addEventListener('sessionend', sessionEnded);
   navigator.xr?.addEventListener('devicechange', checkSupport, listener);
@@ -673,6 +683,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   // and frame loop together so the wearer arrives without a second permission prompt.
   const headset = options.headset;
   if (headset && renderer.xr.getSession() === headset.session && renderer.xr.isPresenting) {
+    engaged = true;
+    overlay.style.pointerEvents = '';
     activeSession = headset.session;
     activeSession.addEventListener('visibilitychange', visibilityChanged);
     floorOffset = headset.reference === 'local-floor' ? 0 : eyeHeight;
@@ -690,10 +702,20 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   // Upload the walking scene behind the globe before starting the dissolve.
   // (textures, programs and buffers in separate tasks, so the flight keeps animating)
-  await uploadTextures(renderer, scene);
+  // each long step in its own task, and only while nothing animates (options.quiet)
+  const pause = async () => { await nextTask(); await options.quiet?.(); };
+  await uploadTextures(renderer, scene, pause);
+  await pause();
   await renderer.compileAsync(scene,camera);
-  await warmUp(renderer, scene, camera);
+  await warmUp(renderer, scene, camera, pause);
+  await pause();
   renderer.render(scene, camera);
+  if (options.start && !(await options.start)) {
+    await leave(false);
+    return;
+  }
+  if (closed) return;
+  engaged = true;
   options.onPrepared(entry => {
     if (closed || entry.opacity <= 0) return;
     const z = entry.distance * Math.sin(entry.tilt) * (1-entry.approach);
@@ -711,6 +733,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       options.onArrived();
       resetDesktop();
       overlay.inert = false;
+      overlay.style.pointerEvents = '';
       bar.hidden = false;
       canvas.focus({preventScroll:true});
       void checkSupport();

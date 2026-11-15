@@ -28,7 +28,8 @@ export function landingFlight(orbit: GlobeControls, destinationFrame: Matrix4) {
   return {
     /** flight progress at which the surface starts to fade in (the walk must be ready by then) */
     dissolveStart: hasClimb ? .60 : .48,
-    duration: 1300 + 170 * (startLog - endLog) + (hasClimb ? 900 : 0),
+    // ~2.2 s from a whole-Moon view, ~1.7 s from 25 km (the walk is prepared behind the popup)
+    duration: 700 + 100 * (startLog - endLog) + (hasClimb ? 500 : 0),
     sample(t: number): LandingFrame {
       const progress = MathUtils.smootherstep(t, 0, 1);
       const align = MathUtils.smootherstep(t, 0, hasClimb ? 0.6 : 0.48);

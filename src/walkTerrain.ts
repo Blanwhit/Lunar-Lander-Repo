@@ -29,6 +29,15 @@ async function fetchJson<T>(name: string): Promise<T> {
   return response.json();
 }
 
+/** Yield to the event loop (no timer clamping or background throttling). */
+function nextTask() {
+  return new Promise<void>(resolve => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
+}
+
 async function readGrid(file: GridFile): Promise<Grid> {
   const response = await fetch(base + file.file);
   if (!response.ok || !response.body) throw new Error('Could not load lunar terrain: ' + file.file);
@@ -37,7 +46,13 @@ async function readGrid(file: GridFile): Promise<Grid> {
   const count = file.width ** 2;
   if (bytes.length !== count * 2) throw new Error('Incomplete lunar terrain: ' + file.file);
   const data = new Int16Array(count);
+  let slice = performance.now();
   for (let row = 0, i = 0; row < file.width; row++) {
+    // decode in slices of a few ms so a landing flight animating meanwhile keeps its frame rate
+    if ((row & 63) === 0 && performance.now() - slice > 6) {
+      await nextTask();
+      slice = performance.now();
+    }
     let delta = 0;
     for (let col = 0; col < file.width; col++, i++) {
       const zig = bytes[i] | (bytes[count + i] << 8);

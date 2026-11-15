@@ -64,6 +64,24 @@ export class HelmetAudio {
   private exertion = 0;
   private recentEffort = 0;
   private nextBreath = 0;
+  private muted = false;
+
+  /** Build the audio graph ahead of time, silent and suspended (creating an AudioContext takes
+   *  tens of ms, too long for the click that starts the landing). start() then only resumes. */
+  prepare() {
+    if (this.disposed || this.context || typeof AudioContext === 'undefined') return;
+    try {
+      this.context = new AudioContext({ latencyHint: 'interactive' });
+      void this.context.suspend().catch(() => {});
+      this.helmet = makeHelmet(this.context);
+      this.helmet.output.gain.value = 0;
+      this.muted = true;
+    } catch {
+      if (this.context) void this.context.close().catch(() => {});
+      this.context = undefined;
+      this.helmet = undefined;
+    }
+  }
 
   /** Call within a walk/VR user gesture so the browser can unlock audio. */
   start() {
@@ -72,6 +90,10 @@ export class HelmetAudio {
       if (!this.context) {
         this.context = new AudioContext({ latencyHint: 'interactive' });
         this.helmet = makeHelmet(this.context);
+      }
+      if (this.muted && this.helmet) {
+        this.helmet.output.gain.value = .65;
+        this.muted = false;
       }
       this.active = true;
       if (this.context.state !== 'running') void this.context.resume().catch(() => {});
