@@ -68,13 +68,14 @@ const walkStyle = `
 .walk-scene button,.walk-scene a {font:inherit;color:inherit;touch-action:manipulation;}
 .walk-scene button {border:1px solid #555b63;background:#25282d;border-radius:7px;padding:7px 11px;cursor:pointer;}
 .walk-scene button.walk-enter {background:#eceef0;color:#101113;border-color:#eceef0;}
-.walk-scene .walk-bar {width:auto;max-width:calc(100% - 20px);grid-template-columns:auto auto;padding:8px 10px;column-gap:10px;}
+.walk-scene .walk-bar {width:max-content;max-width:calc(100% - 20px);grid-template-columns:max-content max-content;padding:8px 10px;column-gap:10px;}
 .walk-scene .mission-views {border-right:1px solid #50565a;padding-right:10px;flex-wrap:nowrap;}
 .walk-scene .walk-help,.walk-scene .walk-status {grid-column:1 / -1;}
 .walk-scene .mission-instruments {position:absolute;top:max(14px,env(safe-area-inset-top));left:14px;max-width:calc(100% - 28px);border-radius:6px;background:#11161bdb;padding:7px 10px;pointer-events:none;}
 .walk-scene .mission-instruments:has(.mission-telemetry:empty) {display:none;}
 .walk-scene .walk-help[hidden],.walk-scene button[hidden] {display:none;}
-@media(max-width:650px){.walk-scene .walk-bar {grid-template-columns:1fr;width:max-content;}.walk-scene .mission-views {border:0;padding:0;}}
+.walk-scene .walk-actions button {white-space:nowrap;}
+@media(max-width:710px){.walk-scene .walk-bar {grid-template-columns:1fr;width:max-content;}.walk-scene .mission-views {border:0;padding:0;}}
 .walk-scene .mission-views button[aria-pressed="true"] {background:#d5e6ed;border-color:#d5e6ed;color:#13212a;}
 .walk-scene .mission-views[hidden],.walk-scene .mission-telemetry[hidden] {display:none;}
 .walk-scene .mission-telemetry {font-variant-numeric:tabular-nums;color:#d2e2eb;}
