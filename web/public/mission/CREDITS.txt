@@ -6,6 +6,11 @@ https://science.nasa.gov/3d-resources/apollo-lunar-module/
 
 Moon viewer adaptations include real-world scaling, lower mesh density, consolidated materials, thermal blanket surface detail and window materials.
 
+Lunar Module exterior geometry adapted from NASA / Michael D. Carbajal. The fitted thermal shields, equipment pallet, hatch, quad housings, strut insulation and radar hardware are visual reconstructions from Apollo 11 photographs and press-kit diagrams.
+NASA/JSC photographs AS11-40-5927 and AS11-44-6581
+https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=40&frame=5927
+https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=44&frame=6581
+
 Apollo 11 press kit, dimensional reference
 https://science.nasa.gov/wp-content/uploads/2023/09/Apollo_11.pdf
 

@@ -352,6 +352,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let prevTime = 0;
   let supportCheck = 0;
   let shadowX = Infinity, shadowZ = Infinity;
+  let finalMissionShadow = false; // the lander's shadow has been drawn once more after it settled
   const missionOrigin=new Vector3(),missionHead=new Vector3();
   let captureOrigin=true;
   // After the glide (desktop): look down at the suit, hold, look back up; controls wait for it.
@@ -385,7 +386,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   let landingX=0, landingZ=0, nextScoreUpdate=0;
   function setObserver(x:number,z:number){
-    landingX=x;landingZ=z;nextScoreUpdate=0;
+    landingX=x;landingZ=z;nextScoreUpdate=0;finalMissionShadow=false;
     targetX=x;targetZ=z+11;desktopYaw=0;desktopPitch=.12;
   }
   setObserver(0,0);syncMissionView();
@@ -939,7 +940,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         lookIntro=activeSession?-1:0; // in a headset the wearer looks around freely
         renderer.render(scene,camera);return;
       }
-      if(sunlight.castShadow && !mission.atRest){
+      if(sunlight.castShadow && (!mission.atRest || !finalMissionShadow)){
+        finalMissionShadow=mission.atRest;
         sunlight.target.position.copy(mission.focus);
         sunlight.target.position.y=ground.floorAt(mission.focus.x,mission.focus.z);
         sunlight.position.copy(sunlight.target.position).addScaledVector(sun,50);

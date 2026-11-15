@@ -23,7 +23,7 @@ import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { pickLandingInVR, type GlobeHeadset } from './globePicker';
 import { GlobeControls } from './controls';
 import { HelmetAudio } from './helmetAudio';
-import { landingFlight, type LandingFrame } from './landingFlight';
+import type { LandingFrame } from './landingFlight';
 import { Compass } from './compass';
 import { Ephemeris } from './ephemeris';
 import { R_MOON, H_MAX_GLOBAL, H_MIN_GLOBAL, latLonToDir } from './geom';
@@ -248,7 +248,6 @@ async function main() {
       lat: Math.asin(Math.max(-1, Math.min(1, dir.z))) / DEG,
       lon: Math.atan2(dir.y, dir.x) / DEG,
     };
-    controls.flyTo(dir);
     stopSeries();
     graphs.clear();
     popup.show(site.lat, site.lon);
@@ -258,9 +257,7 @@ async function main() {
   });
 
   // "Enter VR" is the popup's main action. While the popup is read, the whole surface walk for
-  // that spot is prepared hidden (assets, terrain, ground meshes, GPU uploads, shaders), so the
-  // landing flight only has to render. It starts once the popup's fly-to has settled; closing the
-  // popup, picking another spot or changing the time discards it.
+  // that spot is prepared hidden. Closing the popup, picking another spot or changing time discards it.
   interface WalkPrep {
     lat: number; lon: number; ms: number;
     audio: HelmetAudio;
@@ -285,7 +282,7 @@ async function main() {
     const begin = () => {
       prefetchTimer = 0;
       if (!site || site.lat !== lat || site.lon !== lon) return;
-      // the preparation costs a few long tasks: let the fly-to finish first
+      // Let any user-initiated camera movement settle before preparing the site.
       if (controls.isAnimating() && performance.now() - t0 < 3000) {
         prefetchTimer = window.setTimeout(begin, 100);
         return;
@@ -294,12 +291,9 @@ async function main() {
     };
     prefetchTimer = window.setTimeout(begin, 300);
   }
-  // Long GPU steps of a walk preparation run only while nothing animates: the globe at rest
-  // behind the popup, or the landing flight eased into its pre-fade hold, where a long frame
-  // does not show. (The CPU-heavy steps are sliced and run any time.)
-  let flightHolding = false;
+  // GPU uploads run while the globe is still, including the wait for a selected site.
   let quietWaiters: (() => void)[] = [];
-  const isQuiet = () => (advanceFlight ? flightHolding : !controls.isAnimating());
+  const isQuiet = () => advanceFlight ? !drawApproach : !controls.isAnimating();
   const whenQuiet = () => (isQuiet() ? Promise.resolve() : new Promise<void>((resolve) => quietWaiters.push(resolve)));
   function releaseQuiet() {
     if (!quietWaiters.length || !isQuiet()) return;
@@ -319,8 +313,6 @@ async function main() {
     p.audio.prepare();
     void start.then((started) => { if (!started) p.audio.dispose(); });
     void (async () => {
-      // behind the popup this resolves at once (the fly-to has settled); for a walk only started by
-      // the Enter VR click it waits for the flight's pre-fade hold, so the descent stays smooth
       if (!headset) await whenQuiet();
       const [{ loadWalkTerrain }, walk] = await Promise.all([import('./walkTerrain'), import('./walk')]);
       void walk.prefetchWalk().catch(() => {});
@@ -593,8 +585,8 @@ async function main() {
       poles.hide();
       return;
     }
-    const moved = flightFrame ? !!advanceFlight : controls.update(dt);
-    const fov = (flightFrame?.fov ?? 45) * DEG;
+    const moved = !landingBusy && controls.update(dt);
+    const fov = 45 * DEG;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
     needsRender = false;
     frame++;
@@ -738,49 +730,23 @@ async function main() {
     popup.close();
     walk.audio.start(); // inside the click, so the browser lets the helmet audio play
     walk.go(true);
-    const origin = { target: controls.tgt.clone(), forward: controls.fwd.clone(), distance: controls.dist,
-      tilt: controls.tiltUser, height: controls.pivotHeight };
-    // the flight starts from the current view (the popup's fly-to need not have finished)
-    const flight = landingFlight(controls, frameAt(lat, lon));
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    let elapsed = 0;
-    // The descent starts on the click. If the walk is not ready by the time the surface should
-    // fade in (no time to prepare it behind the popup), the flight eases into a hold just before
-    // that point and picks up again (speed eased both ways) once it is.
-    let ready = false;
-    let speed = 1;
-    const hold = flight.dissolveStart - 0.005;
-    flightFrame = flight.sample(0);
-    advanceFlight = (dt) => {
-      const step = Math.min(dt, 1 / 30);
-      if (reduced) elapsed = ready ? 1 : 0;
-      else {
-        const target = ready ? 1 : Math.min(1, Math.max(0, (hold - elapsed) / 0.06));
-        speed += (target - speed) * -Math.expm1(-step * (ready ? 4 : 12));
-        elapsed = Math.min(ready ? 1 : hold, elapsed + speed * step * 1000 / flight.duration);
-      }
-      // (nearly) at rest in the hold: the walk's remaining GPU steps may run now
-      flightHolding = !ready && (reduced || hold - elapsed < 0.002);
-      flightFrame = flight.sample(elapsed);
-      const height = tree.heightAt([controls.tgt.x, controls.tgt.y, controls.tgt.z]);
-      if (height !== null) controls.pivotHeight += (height - controls.pivotHeight) * -Math.expm1(-dt * 8);
-      walking = ready && flightFrame.opacity >= 1;
+    let opacity = 0;
+    advanceFlight = dt => {
+      if (!drawApproach) return;
+      opacity = reduced ? 1 : Math.min(1, opacity + dt/.24);
+      flightFrame = { opacity, arrived: opacity === 1 };
+      walking = flightFrame.arrived;
     };
     showOrbit(false);
     canvas.inert = true;
     const restore = () => {
-      flightHolding = false;
       walk.audio.dispose();
       if (surfaceStars !== skyMat.uniforms.uStars.value) surfaceStars?.dispose();
       surfaceStars = undefined;
       advanceFlight = undefined;
       drawApproach = undefined;
       flightFrame = undefined;
-      controls.setView(lat, lon, origin.distance);
-      controls.tgt.copy(origin.target);
-      controls.fwd.copy(origin.forward);
-      controls.tiltGoal = controls.tiltUser = origin.tilt;
-      controls.pivotHeight = origin.height;
       canvas.inert = false;
       showOrbit(true);
       walking = false;
@@ -797,7 +763,7 @@ async function main() {
     };
     try {
       const draw = await walk.prepared;
-      if (draw) { drawApproach = draw; ready = true; flightHolding = false; }
+      if (draw) drawApproach = draw;
     } catch (error) {
       console.error('Landing failed', error);
       restore();
