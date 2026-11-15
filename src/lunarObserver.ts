@@ -1,3 +1,4 @@
+import type { VrFeasibility } from './overlay/vrFeasibility';
 import { MathUtils, Matrix4, Mesh, Quaternion, ShaderMaterial, SphereGeometry, Texture, Vector3 } from 'three';
 import { R_MOON, type Vec3 } from './geom';
 
@@ -78,7 +79,7 @@ export class LunarObserver {
 }
 
 /** Render the planet as a distant background at reduced scale to preserve depth precision in XR. */
-export function orbitalMoon(map: Texture, elevation: (direction: Vec3) => number) {
+export function orbitalMoon(map: Texture, elevation: (direction: Vec3) => number, scores?:VrFeasibility) {
   const geometry = new SphereGeometry(1, 240, 120);
   const positions = geometry.getAttribute('position');
   const dir: Vec3 = [0,0,0];
@@ -92,13 +93,16 @@ export function orbitalMoon(map: Texture, elevation: (direction: Vec3) => number
   const material = new ShaderMaterial({
     uniforms: { albedo: {value: map}, sunlight: {value: new Vector3()} },
     vertexShader: `varying vec2 st; varying vec3 n;
-      void main(){st=uv;n=normal;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+      void main(){
+      #include <begin_vertex>
+      st=uv;n=normal;gl_Position=projectionMatrix*modelViewMatrix*vec4(transformed,1.);}`,
     fragmentShader: `uniform sampler2D albedo; uniform vec3 sunlight; varying vec2 st; varying vec3 n;
       void main(){float light=.065+1.5*max(0.,dot(normalize(n),sunlight));
       gl_FragColor=vec4(texture2D(albedo,st).rgb*light,1.);
       #include <colorspace_fragment>
       }`,
   });
+  scores?.applyTo(material,'vec3(position.x,-position.z,position.y)');
   const mesh = new Mesh(geometry, material);
   const bodyOrientation = new Matrix4().makeRotationX(Math.PI/2);
   return {

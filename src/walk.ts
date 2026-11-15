@@ -260,7 +260,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     const [rocks,soil,atlas]=await preloadSurface();
     const field = new BoulderField(atlas, at.seed, at.height.coordinates);
     // built by prepareLanding (sliced, so a flight animating meanwhile keeps its frame rate)
-    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,field);
+    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,field,options.vrScores);
     try {await next.prepareLanding(x,z);return next;}
     catch(error){next.dispose();throw error;}
   }
@@ -1010,6 +1010,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       stick.set(Number(right) - Number(left), Number(up) - Number(down));
     }
 
+    scores?.update(time);
     if(missionLocal && !choosingLanding){
       if(mission.view==='Outside' && viewer){
         const axes=pads[1]?.axes;
@@ -1022,7 +1023,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       if(viewer)viewButton.setDetail(mission.status);
       const orbital = mission.view==='Outside' && mission.observer.orbital;
       if (orbital && !planet) {
-        planet = orbitalMoon(soil.globe,site.height.globalElevation);
+        planet = orbitalMoon(soil.globe,site.height.globalElevation,scores);
         planet.align(site.landingToBody,sun);
         scene.add(planet.mesh);
       }
