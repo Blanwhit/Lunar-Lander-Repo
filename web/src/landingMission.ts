@@ -4,11 +4,12 @@
 // One second after touchdown the camera glides down to the astronaut standing nearby; walk.ts
 // then hands control to the surface walk.
 import {
-  AdditiveBlending, CanvasTexture, BufferGeometry, CylinderGeometry, DataTexture, DoubleSide, EquirectangularReflectionMapping,
-  Float32BufferAttribute, Group, MathUtils, Mesh, MeshStandardMaterial, Object3D, Points, PointsMaterial, Quaternion,
+  AdditiveBlending, CylinderGeometry, DataTexture, DoubleSide, EquirectangularReflectionMapping,
+  Group, MathUtils, Mesh, MeshStandardMaterial, Object3D, Quaternion,
   ShaderMaterial, Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { LandingDust } from './landingDust';
 import { centreHeight, padRadius, LanderDynamics, LandingBed } from './landerDynamics';
 
 export type MissionView = 'Outside' | 'Surface';
@@ -58,12 +59,7 @@ export class LandingMission {
   readonly lander:Object3D;
   private environment:DataTexture;
   private surfaces=new Map<MeshStandardMaterial,MeshStandardMaterial>();
-  private dustGeometry=new BufferGeometry();
-  private dustMaterial=new PointsMaterial({color:0xb3aaa0,size:.075,transparent:true,opacity:.57,depthWrite:false});
-  private dust=new Points(this.dustGeometry,this.dustMaterial);
-  private grains=new Float32Array(220*3);
-  private grainDir=new Float32Array(220*2);
-  private dustFade=1;
+  private dust: LandingDust;
   /** descent engine thrust 0..1 (drives the plume and the dust) */
   private throttle=0;
   private plume:Mesh<CylinderGeometry,ShaderMaterial>;
@@ -129,17 +125,8 @@ export class LandingMission {
     }));
     this.plume.position.set(0,1.15,0);this.plume.frustumCulled=false;this.plume.visible=false;
     this.lander.add(this.plume);
-    this.group.add(this.lander,this.dust);
-    const grainImage=document.createElement('canvas');grainImage.width=grainImage.height=32;
-    const brush=grainImage.getContext('2d')!,falloff=brush.createRadialGradient(16,16,0,16,16,16);
-    falloff.addColorStop(0,'rgba(255,255,255,.8)');falloff.addColorStop(.35,'rgba(255,255,255,.32)');
-    falloff.addColorStop(1,'rgba(255,255,255,0)');brush.fillStyle=falloff;brush.fillRect(0,0,32,32);
-    this.dustMaterial.map=new CanvasTexture(grainImage);this.dustMaterial.size=.42;
-    this.dust.frustumCulled=false;
-    this.dustGeometry.setAttribute('position',new Float32BufferAttribute(this.grains,3));
-    for(let i=0;i<220;i++){
-      const angle=i*2.399963;this.grainDir[i*2]=Math.sin(angle);this.grainDir[i*2+1]=Math.cos(angle);
-    }
+    this.dust = new LandingDust(this.floor);
+    this.group.add(this.lander,this.dust.mesh);
     this.restart(0,0);
   }
   private reflections(){
@@ -158,7 +145,7 @@ export class LandingMission {
     for(const m of this.surfaces.values())m.envMapIntensity=this.sun.y>0?1.1:.36;
     this.destination.set(x,this.floor(x,z),z);
     this.bed=new LandingBed(this.surface);this.dynamics=new LanderDynamics(this.bed);
-    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dustFade=1;this.touchdownAt=-1;this.throttle=0;
+    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dust.reset();this.touchdownAt=-1;this.throttle=0;
     this.firstProbeContact=undefined;
     for(const probe of this.probes)probe.weights[probe.foldedIndex]=0;
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
@@ -236,7 +223,8 @@ export class LandingMission {
       :this.time<FREE_FALL_S?'Free fall':this.time<FREE_FALL_S+IGNITION_S+.4?'Engine start'
       :this.firstProbeContact!==undefined?'Contact light':'Final descent';
     this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
-    this.updateDust(dt);
+    this.dust.update(dt, this.lander.position, this.lander.quaternion, this.height,
+      this.off ? 0 : this.throttle, this.sun.y);
     this.frameCamera(dt,astronautEye,astronautRotation);
   }
   /** height of a lander-local point above the soil under it */
@@ -268,23 +256,7 @@ export class LandingMission {
     if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=CONTACT_RESPONSE_S)return true;
     return solidContacts.some(local=>this.clearance(local)<=0);
   }
-  private updateDust(dt:number){
-    if(this.off)this.dustFade=Math.max(0,this.dustFade-dt*1.8);
-    // the exhaust raises the dust: none before ignition, settling after cutoff
-    const intensity=(1-MathUtils.smoothstep(this.height,1,17))*this.dustFade*Math.min(1,this.throttle*1.5+(this.off?1:0));
-    this.dust.visible=intensity>.01;
-    if(!this.dust.visible)return;
-    const pos=this.dustGeometry.getAttribute('position');
-    const x=this.lander.position.x,z=this.lander.position.z;
-    const count=Math.ceil(220*intensity);this.dustGeometry.setDrawRange(0,count);
-    for(let i=0;i<count;i++){
-      const age=(this.time*(.8+(i%7)*.045)+i*.618)%1;
-      const r=.65+age*(6+(i%11)*.65);
-      const px=x+r*this.grainDir[2*i],pz=z+r*this.grainDir[2*i+1];
-      pos.setXYZ(i,px,this.floor(px,pz)+.035+age*(1-age)*(.4+(i%5)*.08),pz);
-    }
-    pos.needsUpdate=true;this.dustMaterial.opacity=.5*intensity;
-  }
+
   /** slow orbit around the lander; after touchdown + HOLD_S, a glide to the astronaut's eye */
   private frameCamera(dt:number,astronautEye?:Vector3,astronautRotation?:Quaternion){
     const g=this.glideProgress;
@@ -326,6 +298,6 @@ export class LandingMission {
     // GLTF geometry and textures belong to the shared model cache.
     this.environment.dispose();for(const m of this.surfaces.values())m.dispose();
     this.plume.geometry.dispose();this.plume.material.dispose();
-    this.dustGeometry.dispose();this.dustMaterial.map?.dispose();this.dustMaterial.dispose();this.group.removeFromParent();
+    this.dust.dispose();this.group.removeFromParent();
   }
 }
