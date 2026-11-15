@@ -5,6 +5,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { centreHeight, padRadius, LanderDynamics, LandingBed } from './landerDynamics';
+import { LunarObserver } from './lunarObserver';
 import { createMissionCabin } from './missionCabin';
 
 export const missionViews = ['Outside','Cockpit','Surface'] as const;
@@ -16,7 +17,6 @@ export function preloadMission() {
     (await new GLTFLoader().loadAsync(base+name+'.glb')).scene)).catch(error => {models=undefined;throw error;});
 }
 const departureEnd=3.6, transferEnd=7.2;
-const up=new Vector3(0,1,0);
 
 const contactStep=1/120;
 
@@ -64,16 +64,12 @@ export class LandingMission {
   private off=false;
   private phase='Earth departure';
   private lastPosition=new Vector3();
-  private yaw=.42;
-  private pitch=.21;
-  private zoom=1;
-  private panX=0;
-  private panY=0;
+  readonly observer = new LunarObserver();
   height=0;
   speed=0;
   view:MissionView='Outside';
   constructor(assets:Group[],private sun:Vector3,earthMap:Texture|undefined, private floor:(x:number,z:number)=>number,
-    private surface:(x:number,z:number)=>number) {
+    private surface:(x:number,z:number)=>number, private originElevation:()=>number) {
     [this.rocket,this.csm,this.lander]=assets.map(asset=>asset.clone(true));
     this.environment=this.reflections();
     this.lander.traverse(node=>{
@@ -101,9 +97,9 @@ export class LandingMission {
     const plume=new CylinderGeometry(1,2.25,1,32,1,true);
     plume.translate(0,-.5,0);
     // Exhaust expands away from each F-1 bell.
-    for(const [x,z] of [[0,0],[-1.8,-1.8],[1.8,1.8],[1.8,-1.8],[-1.8,1.8]]){
+    for(const [x,z] of [[0,0],[-3.94,-2.85],[-2.84,3.88],[2.83,-3.88],[3.90,2.83]]){
       const nozzle=new Mesh(plume,this.plumeMaterial);
-      nozzle.position.set(x,0,z);nozzle.scale.set(1.35,16,1.35);
+      nozzle.position.set(x,0,z);nozzle.scale.set(1.74,16,1.74);
       this.engines.add(nozzle);
     }
     this.rocket.add(this.engines);
@@ -141,22 +137,17 @@ export class LandingMission {
     this.rocket.rotation.set(0,0,-.15);this.rocket.position.set(x,14000,z);
     if(this.stage)this.stage.position.copy(this.stageRest);
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
-    this.view='Outside';this.yaw=.42;this.pitch=.21;this.zoom=1;this.panX=this.panY=0;this.advance(0);
+    this.observer.reset(x,z,this.originElevation(),this.floor);
+    this.advance(0);
   }
   get inSpace(){return this.time<transferEnd;}
-  get flightVisible(){return this.inSpace && this.view!=='Surface';}
+  get flightVisible(){return this.inSpace && this.view==='Cockpit';}
   get status(){return this.phase;}
   get atRest(){return this.dynamics.settled;}
   get landed(){return this.dynamics.contacted;}
   get telemetry(){
     return this.inSpace ? this.phase : this.phase+' · '+Math.max(0,this.height).toFixed(this.height<10?1:0)+' m · '+this.speed.toFixed(1)+' m/s';
   }
-  orbit(dx:number,dy:number){this.yaw+=dx;this.pitch=MathUtils.clamp(this.pitch+dy,-.22,1.35);}
-  pan(x:number,y:number){
-    this.panX=MathUtils.clamp(this.panX+x,-1.5,1.5);
-    this.panY=MathUtils.clamp(this.panY+y,-1,1);
-  }
-  dolly(delta:number){this.zoom=MathUtils.clamp(this.zoom*Math.exp(delta),.48,4);}
   advance(dt:number){
     this.time+=dt;
     const t=this.time, p=this.destination;
@@ -255,8 +246,10 @@ export class LandingMission {
   private frameCamera(){
     if(this.view==='Cockpit'){
       if(this.inSpace){
-        this.eye.copy(this.focus);this.eye.y+=this.rocket.visible?43:2;
-        this.viewRotation.setFromAxisAngle(up,-.13);
+        const launch=this.rocket.visible;
+        const vehicle=launch?this.rocket:this.csm;
+        this.eye.set(0,launch?98:9,-.48).applyQuaternion(vehicle.quaternion).add(vehicle.position);
+        this.viewRotation.copy(vehicle.quaternion);
       }else{
         this.eye.set(-.55,5.45,-1.4).applyQuaternion(this.lander.quaternion).add(this.lander.position);
         this.viewRotation.copy(this.lander.quaternion);
@@ -264,21 +257,10 @@ export class LandingMission {
       this.cabin.group.position.copy(this.eye);this.cabin.group.quaternion.copy(this.viewRotation);
       this.rocket.visible=false;this.csm.visible=false;
     }else if(this.view==='Outside'){
-      const radius=(this.inSpace?(this.rocket.visible?157:36):13)*this.zoom;
-      const bearing=this.yaw+(this.inSpace?0:2.08);
-      this.eye.set(Math.sin(bearing)*Math.cos(this.pitch),Math.sin(this.pitch),Math.cos(bearing)*Math.cos(this.pitch)).multiplyScalar(radius).add(this.focus);
-      if(!this.inSpace)this.eye.y=Math.max(this.eye.y,this.floor(this.eye.x,this.eye.z)+.48);
-      const dx=this.eye.x-this.focus.x,dy=this.eye.y-this.focus.y,dz=this.eye.z-this.focus.z;
-      this.eye.x+=Math.cos(bearing)*this.panX*radius;
-      this.eye.z-=Math.sin(bearing)*this.panX*radius;
-      this.eye.y+=this.panY*radius;
-      if(!this.inSpace)this.eye.y=Math.max(this.eye.y,this.floor(this.eye.x,this.eye.z)+.48);
-      this.viewRotation.setFromAxisAngle(up,Math.atan2(dx,dz)).multiply(
-        this.cameraPitch.setFromAxisAngle(this.right,-Math.atan2(dy,Math.hypot(dx,dz))));
+      this.eye.copy(this.observer.eye);
+      this.viewRotation.copy(this.observer.rotation);
     }
   }
-  private right=new Vector3(1,0,0);
-  private cameraPitch=new Quaternion();
   dispose(){
     // GLTF geometry and textures belong to the shared model cache.
     this.cabin.dispose();this.earth.geometry.dispose();this.earth.material.dispose();this.earthPhoto.dispose();

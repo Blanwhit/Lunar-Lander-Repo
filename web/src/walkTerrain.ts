@@ -13,6 +13,7 @@ export interface WalkTerrain {
   (x: number, z: number): number;
   coordinates(x: number, z: number): SurfaceLocation;
   prepare(x: number, z: number): Promise<boolean>;
+  globalElevation(bodyDirection: Vec3): number;
 }
 
 const base = import.meta.env.BASE_URL + 'walk-terrain/';
@@ -196,11 +197,14 @@ export async function loadWalkTerrain(lat: number, lon: number): Promise<WalkTer
   patches.sort((a,b)=> b.spacing-a.spacing);
   const direction: Vec3 = [0,0,0];
   const out: SurfaceLocation = {lat,lon,elevation:0,resolution:0};
-  function radial() {
-    const {face,a,b} = dirToFace(direction);
+  function globalElevation(bodyDirection: Vec3) {
+    const {face,a,b} = dirToFace(bodyDirection);
     const globe = faces[face], half = (globe.width-1)/2;
-    out.elevation = sample(globe,(1+a)*half,(1+b)*half);
-    out.resolution = 90*metresPerDegree/(globe.width-1);
+    return sample(globe,(1+a)*half,(1+b)*half);
+  }
+  function radial() {
+    out.elevation = globalElevation(direction);
+    out.resolution = 90*metresPerDegree/(faces[0].width-1);
     out.lat = Math.atan2(direction[2],Math.hypot(direction[0],direction[1]))*degrees;
     out.lon = Math.atan2(direction[1],direction[0])*degrees;
     regional.sample(out.lat,out.lon,out);
@@ -238,6 +242,7 @@ export async function loadWalkTerrain(lat: number, lon: number): Promise<WalkTer
 
   const terrain = solve as WalkTerrain;
   terrain.coordinates = (x,z) => { solve(x,z); return {...out}; };
+  terrain.globalElevation = globalElevation;
   terrain.prepare = (x,z) => { const point = terrain.coordinates(x,z); return prepareAt(point.lat,point.lon); };
   return terrain;
 }
