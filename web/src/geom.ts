@@ -32,6 +32,7 @@ export const FACES: { n: Vec3; u: Vec3; v: Vec3 }[] = [
  * is the largest |component| (ties: x, then y, then z, like taking the first face with the
  * largest d . N) and d . U, d . V are single signed components:
  *   +X: U=+y V=+z   -X: U=-y V=+z   +Y: U=-x V=+z   -Y: U=+x V=+z   +Z: U=+y V=-x   -Z: U=+y V=+x
+ * (api/terrain.ts sampleAt() has an inlined copy for its inner loop: keep the two in sync)
  */
 export function dirToFace(d: Vec3): { face: number; a: number; b: number } {
   const x = d[0], y = d[1], z = d[2];

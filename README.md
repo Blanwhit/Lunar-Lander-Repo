@@ -235,10 +235,14 @@ at the point over the preceding three lunations (30-minute steps). Pass
 - **Earth link:** this is line-of-sight geometry only. There is no RF link budget and no
   diffraction model.
 - **Range and speed:** times are limited to the ephemeris range (2000–2050). The first query at
-  a site takes ~0.3–1.5 s, mostly loading height tiles (~40 KB each) for its horizon; a missing
-  tile is loaded together with every level below it that the lookup needs, so the horizon is
-  ready after 2–3 fetch rounds. Further queries at the same site (another date or time) take
-  ~50–100 ms: the horizon and the reference-year statistics are cached per site.
+  a site takes ~0.1–0.4 s, nearly all of it loading the 60–300 height tiles (~40 KB each) of its
+  horizon. In the browser they are fetched and decoded by a pool of workers
+  ([tilePool.ts](web/src/api/tilePool.ts)), and most are requested before the site's own tiles
+  have arrived: which tiles a horizon ray reads depends on the distance, not on the terrain. One
+  scan then serves every observer height (the query's and the score's masts), and a pass that
+  finds a tile missing resumes each ray where it stopped once the tile is there. Further queries
+  at the same site (another date or time) take ~25–50 ms: the horizon and the reference-year
+  statistics are cached per site, and most of what is left is the regolith temperature model.
 
 ## Feasibility score
 

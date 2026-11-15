@@ -22,9 +22,10 @@
 // from north; elevation in degrees above the local horizontal plane (normal to the sphere).
 import { Matrix3, Vector3 } from 'three';
 import { Ephemeris } from '../ephemeris';
-import { R_MOON, latLonToDir, texelSize, type Vec3 } from '../geom';
+import { R_MOON, TILE_N, latLonToDir, texelSize, type Vec3 } from '../geom';
 import { moonOrientation, type OrientationProvider } from '../orientation';
 import { TileTerrain } from './terrain';
+import { createTilePool } from './tilePool';
 import { albedo, simulateRegolith, simulateRegolithSeries } from './thermal';
 import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig, type FeasibilityInputs, type FeasibilityResult } from './feasibility';
 
@@ -276,6 +277,8 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const base = opts.baseUrl.endsWith('/') ? opts.baseUrl : opts.baseUrl + '/';
   const fetchImpl = opts.fetch ?? fetch.bind(globalThis);
   const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl);
+  // decode height tiles in parallel workers where there are any (a caller's own fetch stays in charge)
+  if (!opts.fetch) terrain.loader = createTilePool(terrain.fetchLocal) ?? undefined;
   const ephem = new Ephemeris(base + 'ephem/', fetchImpl);
   const orientation = opts.orientation ?? moonOrientation;
   const thermal = opts.temperatureModel ?? thermophysicalModel;
@@ -283,6 +286,12 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   let ephemReady: Promise<void> | null = null;
   const horizonCache = new Map<string, Promise<HorizonProfile>>();
   const refYearCache = new Map<string, { sun: number; earth: number; n: number }>();
+  // Moon-centred Sun and Earth in the body frame (km) by timestamp. They don't depend on the
+  // site, and the same times are asked for again and again: the rise/set searches of the
+  // ground and of the masts step over one grid, a time series evaluates each sample from two
+  // heights, and the reference year is the same at every site.
+  const bodyCache = new Map<number, number[]>();
+  const BODY_CACHE_MAX = 30000; // ~4 MB; the cache is simply emptied when it gets there
 
   const initEphem = () => (ephemReady ??= ephem.init());
 
@@ -299,56 +308,145 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const siteHeight = async (lat: number, lon: number) =>
     terrain.until(() => terrain.sample(latLonToDir(lat, lon), 99));
 
-  async function horizon(lat: number, lon: number, observerHeightM = 2): Promise<HorizonProfile> {
-    const k = `${lat.toFixed(7)},${lon.toFixed(7)},${observerHeightM}`;
-    let p = horizonCache.get(k);
-    if (!p) {
-      p = computeHorizon(lat, lon, observerHeightM);
-      horizonCache.set(k, p);
-      p.catch(() => horizonCache.delete(k));
+  const horizonKey = (lat: number, lon: number, h: number) => `${lat.toFixed(7)},${lon.toFixed(7)},${h}`;
+
+  /**
+   * Horizon profiles of one site from several heights above the ground (the receiver, a
+   * panel mast, an antenna mast). The ones not cached yet are computed together: the rays
+   * of every height march over the same terrain samples, so one scan serves them all.
+   */
+  function horizons(lat: number, lon: number, heights: number[]): Promise<HorizonProfile[]> {
+    const todo = [...new Set(heights)].filter((h) => !horizonCache.has(horizonKey(lat, lon, h)));
+    if (todo.length) {
+      const scan = computeHorizons(lat, lon, todo);
+      todo.forEach((h, j) => {
+        const k = horizonKey(lat, lon, h);
+        const p = scan.then((r) => r[j]);
+        horizonCache.set(k, p);
+        p.catch(() => horizonCache.delete(k));
+      });
     }
-    return p;
+    return Promise.all(heights.map((h) => horizonCache.get(horizonKey(lat, lon, h))!));
   }
 
-  async function computeHorizon(lat: number, lon: number, hObs: number): Promise<HorizonProfile> {
+  async function horizon(lat: number, lon: number, observerHeightM = 2): Promise<HorizonProfile> {
+    return (await horizons(lat, lon, [observerHeightM]))[0];
+  }
+
+  async function computeHorizons(lat: number, lon: number, heights: number[]): Promise<HorizonProfile[]> {
     const f = localFrame(lat, lon);
-    const site = await siteHeight(lat, lon);
-    const r0 = R_MOON + site.h + hObs;
-    const rTop = R_MOON + H_MAX;
+    const { up, east, north } = f;
     const n = Math.round(360 / azStep);
-    const elev = new Float32Array(n);
-    let maxDist = 0;
-    const d0 = Math.max(2, texelSize(site.level) * 0.5);
     const ANG = 0.0026; // target angular resolution of the terrain grid (~0.15 deg)
+    const tex0 = texelSize(0);
+    /** tile level a ray reads at distance d: cells no larger than d * ANG */
+    const levelAt = (d: number) => Math.max(0, Math.ceil(Math.log2(tex0 / Math.max(d * ANG, 1))));
+
+    // Loading the tiles is most of the work, and which tiles the rays read hardly depends on
+    // the terrain: at distance d a ray reads level levelAt(d), until it stops. So before
+    // anything can be measured (the site's own tiles are still on their way), ask for the
+    // tiles along every ray out to EARLY_M, stepping a quarter tile at a time. Rays seldom
+    // stop sooner (that takes a horizon ~10 deg high all around); what lies beyond, and
+    // any tile these coarse steps skipped, the scan below asks for itself.
+    const EARLY_M = 60e3;
+    const siteTiles = siteHeight(lat, lon); // first, so the site's chain is requested first
+    for (let i = 0; i < n; i++) {
+      const az = i * azStep * DEG;
+      const ca = Math.cos(az), sa = Math.sin(az);
+      const hx = ca * north.x + sa * east.x, hy = ca * north.y + sa * east.y, hz = ca * north.z + sa * east.z;
+      for (let d = 2; d < EARLY_M;) {
+        const th = d / R_MOON;
+        const c = Math.cos(th), s = Math.sin(th);
+        const L = levelAt(d);
+        terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L);
+        d += Math.max((TILE_N / 4) * texelSize(L), d * 0.01);
+      }
+    }
+    // a failed load is reported by the scan, which asks for the same tile again
+    const earlyTiles = terrain.fetchWanted().catch(() => 0);
+    const site = await siteTiles;
+    await earlyTiles;
+
+    const m = heights.length;
+    const r0 = heights.map((h) => R_MOON + site.h + h);
+    const rTop = R_MOON + H_MAX;
+    const elev = heights.map(() => new Float32Array(n));
+    const reach = heights.map(() => new Float64Array(n)); // where each ray stopped (m)
+    const best = new Float64Array(m); // per height: highest tangent so far on this ray
+    const open = new Uint8Array(m); // per height: the ray is still marching
+    const d0 = Math.max(2, texelSize(site.level) * 0.5);
+    // The scan is repeated until it misses no tile. Everything a ray did before its first
+    // miss is final (those samples came from the tiles it asked for, and tiles never
+    // change), so a pass saves the ray's state there and the next pass resumes from it; a
+    // ray that marched to its end without a miss is done. Only the first pass is a full one.
+    const done = new Uint8Array(n);
+    const rayD = new Float64Array(n).fill(d0); // where the ray resumes
+    const rayBest = new Float64Array(n * m).fill(-Infinity);
+    const rayOpen = new Uint8Array(n * m).fill(1);
     await terrain.until(() => {
-      maxDist = 0;
       for (let i = 0; i < n; i++) {
-        const az = i * azStep;
+        if (done[i]) continue;
+        // unit vector along the ray's azimuth in the local horizontal plane (as in dirAt)
+        const az = i * azStep * DEG;
+        const ca = Math.cos(az), sa = Math.sin(az);
+        const hx = ca * north.x + sa * east.x, hy = ca * north.y + sa * east.y, hz = ca * north.z + sa * east.z;
         // elevation atan2(r1 cos th - r0, r1 sin th) with r1 sin th > 0 is monotonic in the
         // tangent (r1 cos th - r0) / (r1 sin th): compare tangents, one atan at the end
-        let best = -Infinity;
-        let d = d0;
+        let nOpen = 0;
+        for (let j = 0; j < m; j++) {
+          best[j] = rayBest[i * m + j];
+          nOpen += open[j] = rayOpen[i * m + j];
+        }
+        let d = rayD[i];
+        let clean = true; // no tile missed on this ray in this pass
         while (d < 800e3) {
           const th = d / R_MOON;
           const c = Math.cos(th), s = Math.sin(th);
-          // nothing on the Moon is higher than H_MAX: stop when even that would be lower
-          if ((rTop * c - r0) / (rTop * s) < best) break;
-          const cellMax = Math.max(d * ANG, 1);
-          const L = Math.max(0, Math.ceil(Math.log2(texelSize(0) / cellMax)));
-          const smp = terrain.sample(dirAt(f, az, d), L);
-          if (!isNaN(smp.h)) {
-            const r1 = R_MOON + smp.h;
-            const e = (r1 * c - r0) / (r1 * s);
-            if (e > best) best = e;
+          // nothing on the Moon is higher than H_MAX: a height's ray stops when even that
+          // would be lower than its horizon so far
+          for (let j = 0; j < m; j++) {
+            if (open[j] && (rTop * c - r0[j]) / (rTop * s) < best[j]) {
+              open[j] = 0;
+              reach[j][i] = d;
+              nOpen--;
+            }
           }
-          d += Math.max(0.75 * texelSize(Math.max(smp.level, 0)), d * 0.01);
+          if (nOpen === 0) break;
+          const L = levelAt(d);
+          const misses = terrain.misses;
+          const h = terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L);
+          if (clean && terrain.misses !== misses) {
+            // first miss: resume here (the stops above are final, this sample is not);
+            // the rest of this pass only finds out which other tiles the ray needs
+            clean = false;
+            rayD[i] = d;
+            for (let j = 0; j < m; j++) {
+              rayBest[i * m + j] = best[j];
+              rayOpen[i * m + j] = open[j];
+            }
+          }
+          if (!isNaN(h)) {
+            const r1 = R_MOON + h;
+            for (let j = 0; j < m; j++) {
+              if (!open[j]) continue;
+              const e = (r1 * c - r0[j]) / (r1 * s);
+              if (e > best[j]) best[j] = e;
+            }
+          }
+          d += Math.max(0.75 * texelSize(Math.max(terrain.hitLevel, 0)), d * 0.01);
         }
-        elev[i] = Math.atan(best) / DEG;
-        if (d > maxDist) maxDist = d;
+        for (let j = 0; j < m; j++) {
+          if (open[j]) reach[j][i] = d; // marched to the limit
+          elev[j][i] = Math.atan(best[j]) / DEG;
+        }
+        if (clean) done[i] = 1;
       }
       return 0;
     });
-    return { lat, lon, observerHeightM: hObs, azimuthStepDeg: azStep, elevationDeg: elev, maxDistanceKm: maxDist / 1000 };
+    return heights.map((h, j) => ({
+      lat, lon, observerHeightM: h, azimuthStepDeg: azStep, elevationDeg: elev[j],
+      maxDistanceKm: reach[j].reduce((a, b) => Math.max(a, b), 0) / 1000,
+    }));
   }
 
   const horizonAt = (hp: HorizonProfile, azDeg: number) => {
@@ -366,11 +464,20 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
 
   /** Sun and Earth positions relative to the site (body frame, km) */
   async function bodiesFrom(ms: number, sitePosKm: Vector3) {
-    const st = await ephem.at(ms);
-    const m: Matrix3 = orientation.bodyToJ2000(new Date(ms)).transpose();
-    const sun = new Vector3(...st.sun).applyMatrix3(m).sub(sitePosKm);
-    const earth = new Vector3(...st.earth).applyMatrix3(m).sub(sitePosKm);
-    return { sun, earth };
+    let b = bodyCache.get(ms);
+    if (!b) {
+      const st = await ephem.at(ms);
+      const m: Matrix3 = orientation.bodyToJ2000(new Date(ms)).transpose();
+      const sun = new Vector3(...st.sun).applyMatrix3(m);
+      const earth = new Vector3(...st.earth).applyMatrix3(m);
+      b = [sun.x, sun.y, sun.z, earth.x, earth.y, earth.z];
+      if (bodyCache.size >= BODY_CACHE_MAX) bodyCache.clear();
+      bodyCache.set(ms, b);
+    }
+    return {
+      sun: new Vector3(b[0], b[1], b[2]).sub(sitePosKm),
+      earth: new Vector3(b[3], b[4], b[5]).sub(sitePosKm),
+    };
   }
 
   function geometry(v: Vector3, radiusKm: number, f: Frame, hp: HorizonProfile): BodyGeometry {
@@ -417,9 +524,20 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
 
   // ---- per-site setup shared by query() and timeSeries() -------------------------------
   /** terrain at the site: elevation, slope (finest tile), local prominence and horizon */
-  async function prepare(lat: number, lon: number, hObs: number, check: () => void) {
+  async function prepare(lat: number, lon: number, hObs: number, check: () => void, cfg: FeasibilityConfig) {
     const f = localFrame(lat, lon);
-    const site = await siteHeight(lat, lon);
+    const ringAt = (maxLevel: number) => terrain.until(() =>
+      [0, 45, 90, 135, 180, 225, 270, 315].map((az) => terrain.sample(dirAt(f, az, PROMINENCE_RING_M), maxLevel).h));
+    // Loading tiles is the slow part, so every load starts now and they overlap: the site's
+    // own chain and the horizon's tiles (computeHorizons; the mast heights the score needs
+    // later, see atHeight, are scanned along with the query's), and the prominence ring's
+    // (the site's level isn't known yet, so down to the finest there is).
+    const horizonScan = horizons(lat, lon, [hObs, cfg.panelHeightM, cfg.antennaHeightM]);
+    horizonScan.catch(() => {});
+    const siteTiles = siteHeight(lat, lon);
+    const ringTiles = ringAt(99);
+    ringTiles.catch(() => {});
+    const site = await siteTiles;
     check();
     const cell = texelSize(site.level);
     const b = 2 * cell;
@@ -432,13 +550,12 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     if (slopeDeg < 0.05) aspect = null;
     const normal = f.up.clone().addScaledVector(f.east, -dzde).addScaledVector(f.north, -dzdn).normalize();
     // local prominence: height above the mean of 8 points on a 3 km ring
-    const ring = await terrain.until(() =>
-      [0, 45, 90, 135, 180, 225, 270, 315].map((az) => terrain.sample(dirAt(f, az, PROMINENCE_RING_M), site.level).h));
+    await ringTiles;
+    const ring = await ringAt(site.level);
     const prominence = site.h - ring.reduce((a, b2) => a + b2, 0) / ring.length;
 
-    // horizon (the horizon scan is the longest synchronous step: check right before)
     check();
-    const hp = await horizon(lat, lon, hObs);
+    const [hp] = await horizonScan;
     check();
     const siteKm = f.up.clone().multiplyScalar((R_MOON + site.h + hObs) / 1000);
     return { f, site, cell, baseline: b, slopeDeg, aspect, normal, prominence, hp, siteKm };
@@ -547,7 +664,8 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     const hObs = q.observerHeightM ?? 2;
     const mask = q.linkMaskDeg ?? 0;
     const days = q.searchDays ?? 30;
-    const ctx = await prepare(lat, lon, hObs, check);
+    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
+    const ctx = await prepare(lat, lon, hObs, check, cfg);
     const { f, site, cell, baseline: b, slopeDeg, aspect, normal, prominence, hp } = ctx;
     const { geo, sunGeo, earthGeo } = geoFns(ctx);
     const now = await geo(ms);
@@ -632,7 +750,6 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     });
 
     // the score sees the Sun / Earth from the panel / antenna mast, with the horizon tolerance
-    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
     const feasInputs: FeasibilityInputs = {
       ...(await mastInputs(ctx, lat, lon, ms, mask, days, cfg, check)),
       slopeDeg,
@@ -737,7 +854,7 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
 
     const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
     const tol = cfg.horizonToleranceDeg;
-    const ctx = await prepare(lat, lon, hObs, check);
+    const ctx = await prepare(lat, lon, hObs, check, cfg);
     const { geo } = geoFns(ctx);
     // the score sees the Sun / Earth from the panel / antenna mast, with the horizon tolerance
     const ctxP = await atHeight(ctx, lat, lon, cfg.panelHeightM, check);

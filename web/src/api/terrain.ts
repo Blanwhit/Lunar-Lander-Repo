@@ -5,8 +5,9 @@
 // can run a computation, fetch the missing tiles in one batch, and repeat until nothing is
 // missing (see TileTerrain.until()). A miss records the whole chain down to the requested
 // level, so one fetch round loads every level a lookup needs (not one level per round).
-import { GRID, TILE_N, dirToFace, type Vec3 } from '../geom';
+import { GRID, TILE_N, type Vec3 } from '../geom';
 import { decodeHeightTile, type DecodedHeightTile } from '../terrain/heightCodec';
+import type { LoadedTile, TileLoader } from './tilePool';
 
 export interface TerrainTile extends DecodedHeightTile {
   /** loaded children (index (cy << 1) | cx); undefined = not loaded yet, null = none */
@@ -40,17 +41,34 @@ export class TileTerrain {
   maxLevel = 11;
   tilesLoaded = 0;
   bytesLoaded = 0;
+  /** lookups that found a tile missing so far (unchanged across a computation = it is final) */
+  misses = 0;
+  /** level of the tile that served the last sampleAt() (-1: the face's root is not loaded) */
+  hitLevel = -1;
+  /** the tile that served the last lookup: the next one usually falls in it too */
+  private last: TerrainTile | undefined;
+  /** fetches + decodes a tile elsewhere (a worker pool); unset: on this thread (fetchLocal) */
+  loader: TileLoader | undefined;
 
   /** @param baseUrl URL of the tile pyramid (the folder containing h/, meta.json) */
   constructor(private baseUrl: string, private fetchImpl: typeof fetch = fetch.bind(globalThis)) {}
 
   // ---------------------------------------------------------------- loading
-  private async loadTile(L: number, f: number, x: number, y: number): Promise<void> {
-    const r = await this.fetchImpl(`${this.baseUrl}h/${L}/${f}/${y}/${x}.bin`);
-    if (!r.ok) throw new Error(`height tile ${L}/${f}/${x}/${y}: HTTP ${r.status}`);
+  /** fetch + decode a tile file on this thread */
+  readonly fetchLocal: TileLoader = async (url): Promise<LoadedTile> => {
+    const r = await this.fetchImpl(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const buf = await r.arrayBuffer();
-    this.bytesLoaded += buf.byteLength;
-    const t = (await decodeHeightTile(buf)) as TerrainTile;
+    return { tile: await decodeHeightTile(buf), bytes: buf.byteLength };
+  };
+
+  private async loadTile(L: number, f: number, x: number, y: number): Promise<void> {
+    const url = `${this.baseUrl}h/${L}/${f}/${y}/${x}.bin`;
+    const loaded = await (this.loader ?? this.fetchLocal)(url).catch((e) => {
+      throw new Error(`height tile ${L}/${f}/${x}/${y}: ${e instanceof Error ? e.message : e}`);
+    });
+    this.bytesLoaded += loaded.bytes;
+    const t = loaded.tile as TerrainTile;
     t.children = t.childMask ? [undefined, undefined, undefined, undefined] : [null, null, null, null];
     this.tilesLoaded++;
     if (L === 0) {
@@ -78,6 +96,8 @@ export class TileTerrain {
     if (!p) {
       p = this.loadTile(L, f, x, y);
       this.pending.set(k, p);
+      // a failed load (a network hiccup) may be tried again by a later lookup
+      p.catch(() => this.pending.delete(k));
     }
     return p;
   }
@@ -96,7 +116,7 @@ export class TileTerrain {
   }
 
   /** fetch every tile chain requested by sync lookups since the last call */
-  async fetchWanted(concurrency = 16): Promise<number> {
+  async fetchWanted(concurrency = 32): Promise<number> {
     const list = [...this.wanted.values()];
     this.wanted.clear();
     let i = 0, n = 0;
@@ -123,13 +143,44 @@ export class TileTerrain {
    * face's root tile is not loaded yet.
    */
   sample(dir: Vec3, maxLevel: number): Sample {
-    const { face, a, b } = dirToFace(dir);
+    const h = this.sampleAt(dir[0], dir[1], dir[2], maxLevel);
+    return { h, level: this.hitLevel };
+  }
+
+  /**
+   * sample() for inner loops (the horizon scan takes ~10^5 samples): the direction as three
+   * numbers, the height returned and the serving tile's level left in `hitLevel`, so a
+   * lookup allocates nothing. Same result as sample().
+   */
+  sampleAt(x: number, y: number, z: number, maxLevel: number): number {
+    // direction -> face + face coords: geom.dirToFace, inlined (keep the two in sync)
+    const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+    let face: number, dn: number, u: number, v: number;
+    if (ax >= ay && ax >= az) {
+      if (x >= 0) { face = 0; dn = x; u = y; } else { face = 1; dn = -x; u = 0 - y; }
+      v = z;
+    } else if (ay >= az) {
+      if (y >= 0) { face = 2; dn = y; u = 0 - x; } else { face = 3; dn = -y; u = x; }
+      v = z;
+    } else {
+      if (z >= 0) { face = 4; dn = z; v = 0 - x; } else { face = 5; dn = -z; v = x; }
+      u = y;
+    }
+    const a = (Math.atan(u / dn) * 4) / Math.PI, b = (Math.atan(v / dn) * 4) / Math.PI;
+
     const root = this.roots[face];
     if (!root) {
       this.want(face, a, b, 0, maxLevel);
-      return { h: NaN, level: -1 };
+      this.hitLevel = -1;
+      return NaN;
     }
     let t: TerrainTile = root;
+    // Consecutive lookups mostly fall in the same tile. The walk down from the root passes
+    // through tile (tileAt(a, L), tileAt(b, L)) at every level L it reaches, so when the last
+    // tile contains this point and is no deeper than wanted, the walk can resume from it.
+    const l = this.last;
+    if (l !== undefined && l.face === face && l.level <= maxLevel && l.level > 0
+      && tileAt(a, l.level) === l.x && tileAt(b, l.level) === l.y) t = l;
     while (t.level < maxLevel && t.childMask) {
       const n2 = 2 << t.level; // tiles per side at the child level
       const cx = Math.min(1, Math.max(0, Math.floor(((a + 1) / 2) * n2) - t.x * 2));
@@ -142,10 +193,13 @@ export class TileTerrain {
       if (c === null) break;
       t = c;
     }
-    return { h: bilinear(t, a, b), level: t.level };
+    this.last = t;
+    this.hitLevel = t.level;
+    return bilinear(t, a, b);
   }
 
   private want(face: number, a: number, b: number, from: number, maxLevel: number) {
+    this.misses++;
     const to = Math.max(from, Math.min(maxLevel, this.maxLevel));
     // one entry per tile at the target level: lookups that share it share the chain
     const k = key(to, face, tileAt(a, to), tileAt(b, to));

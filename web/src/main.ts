@@ -869,7 +869,17 @@ async function main() {
   // site API (lazy-loaded): (await __moon.siteApi()).query({ lat, lon, time })
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
-    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl })));
+    (siteApi ??= import('./api/siteApi')
+      .then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl }))
+      .catch((e) => {
+        siteApi = null; // a failed load may be tried again
+        throw e;
+      }));
+  // fetch its code once the page is idle, so the first right-click doesn't wait for it
+  const whenIdle: (f: () => void) => void = (window as any).requestIdleCallback
+    ? (f) => (window as any).requestIdleCallback(f, { timeout: 5000 })
+    : (f) => setTimeout(f, 2000);
+  whenIdle(() => void (window as any).__moon.siteApi().catch(() => {}));
 }
 
 /** optional deep link: #lat,lon,dist_m[,heading_deg[,tilt_deg[,ISO-8601 UTC time]]] */
