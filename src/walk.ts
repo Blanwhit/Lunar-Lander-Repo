@@ -295,7 +295,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const canvas = renderer.domElement;
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-label', 'Lunar surface, first-person view');
-  const mission=new LandingMission(spacecraft,sun,options.earth?.texture,(x,z)=>ground.floorAt(x,z),(x,z)=>ground.surfaceAt(x,z),()=>site.height.coordinates(0,0).elevation);
+  const mission=new LandingMission(spacecraft,sun,(x,z)=>ground.floorAt(x,z),(x,z)=>ground.surfaceAt(x,z),()=>site.height.coordinates(0,0).elevation);
   scene.add(mission.group);
   let missionLocal=true;
   const scores = options.vrScores;
@@ -303,7 +303,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const pointers = new VrHudPointers();
   const globeButton = new VrHudButton('Return to globe', requestGlobe, scores ? .235 : 0);
   const viewButton = new VrHudButton('View · Outside', () => {
-    setMissionView(missionViews[(missionViews.indexOf(mission.view)+1)%3]);
+    setMissionView(missionViews[(missionViews.indexOf(mission.view)+1)%missionViews.length]);
   }, 0, undefined, 1);
   rig.add(viewButton.mesh,globeButton.mesh);
   if (scoreButton) rig.add(scoreButton.mesh);
@@ -375,17 +375,30 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let prevTime = 0;
   let supportCheck = 0;
   let shadowX = Infinity, shadowZ = Infinity;
+  function placeShadow(x:number,z:number){
+    shadowX=x;shadowZ=z;
+    sunlight.target.position.set(x,ground.floorAt(x,z),z);
+    sunlight.position.copy(sunlight.target.position).addScaledVector(sun,50);
+    sunlight.shadow.needsUpdate=true;
+  }
   let finalMissionShadow = false;
   let surfaceHeading = 0;
   const missionOrigin=new Vector3(),missionHead=new Vector3();
-  let captureOrigin=true,missionLookX=0,missionLookY=0;
+  let captureOrigin=true,alignToLanding=false;
+  const outsideHeading=new Quaternion();
+  const headingAxis=new Vector3();
+  function headsetYaw(orientation:Quaternion) {
+    // The projected right axis also gives a heading when the wearer looks straight down.
+    headingAxis.set(1,0,0).applyQuaternion(orientation);
+    return Math.atan2(-headingAxis.z,headingAxis.x);
+  }
   function setMissionView(view:MissionView) {
     if(!missionLocal)return;
     if(activeSession && mission.view==='Surface')surfaceHeading=rig.rotation.y;
     mission.view=view;
     mission.advance(0);
     syncMissionView();
-    captureOrigin=true;missionLookX=missionLookY=0;
+    captureOrigin=true;
     resetControls();
     if(view==='Surface'){
       rig.rotation.set(0,activeSession?surfaceHeading:0,0);trackingOriginPending=!!activeSession;
@@ -397,14 +410,37 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     modes.forEach((b,i)=>b.setAttribute('aria-pressed',String(missionViews[i]===mission.view)));
     viewButton.setCaption('View · '+mission.view);
     help.textContent=mission.view==='Outside'?'Drag to orbit · Right-drag or Shift-drag to pan · Scroll to zoom':
-      mission.view==='Cockpit'?'Drag to look around':desktopControls+' Click terrain to travel there.';
+      desktopControls+' Click terrain to travel there.';
     suit.group.visible=mission.view==='Surface';samples.group.visible=suit.group.visible;
   }
   let landingX=0, landingZ=0, nextScoreUpdate=0;
   function setObserver(x:number,z:number){
     landingX=x;landingZ=z;nextScoreUpdate=0;
     surfaceHeading=0;finalMissionShadow=false;
-    targetX=x;targetZ=z+11;desktopYaw=0;desktopPitch=.12;
+    // Stand beyond the ladder footpad. Try alternate bearings if a ridge hides the hull.
+    let bestClearance=-Infinity;
+    const hatchY=ground.floorAt(x,z)+2.8;
+    for(const bearing of [2.70,-2.70,2.1,-2.1,1.4,-1.4,.7,-.7,0]){
+      const dx=16*Math.sin(bearing), dz=16*Math.cos(bearing);
+      const eyeY=ground.surfaceAt(x+dx,z+dz,.12)+eyeHeight;
+      let clearance=Infinity;
+      for(let i=1;i<8;i++){
+        const t=i/8;
+        clearance=Math.min(clearance,MathUtils.lerp(hatchY,eyeY,t)-ground.surfaceAt(x+dx*t,z+dz*t));
+      }
+      if(clearance>bestClearance){
+        targetX=x+dx;targetZ=z+dz;desktopYaw=bearing;bestClearance=clearance;
+      }
+      if(clearance>.5)break;
+    }
+    desktopPitch=.12;
+  }
+  function startHeadsetObserver(x=landingX,z=landingZ){
+    if(!missionLocal)return;
+    mission.enterSurfaceVR();
+    setObserver(x,z);
+    setMissionView('Surface');
+    alignToLanding=true;
   }
   setObserver(0,0);syncMissionView();
   canvas.addEventListener('wheel',event=>{
@@ -519,7 +555,12 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         }
       }
       if(!(hit instanceof Vector3)){
-        missionLocal=true;views.hidden=false;telemetry.hidden=false;mission.restart(x,z);setObserver(x,z);setMissionView(mission.view);
+        missionLocal=true;views.hidden=false;telemetry.hidden=false;mission.restart(x,z);
+        if(activeSession){
+          startHeadsetObserver(x,z);
+        }else{
+          setObserver(x,z);setMissionView(mission.view);
+        }
       }else {targetX=x;targetZ=z;}
       trackingOriginPending=!!activeSession;
       if(!activeSession)resetDesktop();
@@ -590,13 +631,10 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (e.pointerId !== activePointer || activeSession) return;
     if(!dragged && Math.hypot(e.clientX-downX,e.clientY-downY)<=5)return;
     dragged=true;
-    if(missionLocal && mission.view!=='Surface'){
+    if(missionLocal && mission.view==='Outside'){
       const dx=e.clientX-pointerX,dy=e.clientY-pointerY;
-      if(mission.view==='Outside'){
-        if(e.shiftKey || (e.buttons & 2))mission.observer.pan(-dx*.0025,dy*.0025);
-        else mission.observer.orbit(-dx*.006,dy*.006);
-      }
-      else {missionLookX-=dx*.004;missionLookY=MathUtils.clamp(missionLookY-dy*.004,-1.5,1.5);}
+      if(e.shiftKey || (e.buttons & 2))mission.observer.pan(-dx*.0025,dy*.0025);
+      else mission.observer.orbit(-dx*.006,dy*.006);
       pointerX=e.clientX;pointerY=e.clientY;return;
     }
     desktopYaw -= (e.clientX - pointerX) * 0.004;
@@ -657,14 +695,14 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (closed || check !== supportCheck || pendingSession || activeSession) return;
     enter.disabled = !supported;
     if (supported) {
-      enter.title='Enter the current view in your headset';status.textContent='';
+      enter.title='Watch the landing from the lunar surface';status.textContent='';
     } else {
       showHeadsetHint();
     }
   }
   function sessionEnded() {
     activeSession?.removeEventListener('visibilitychange',visibilityChanged);
-    activeSession = null;captureOrigin=true;
+    activeSession = null;captureOrigin=true;alignToLanding=false;
     pendingSession = false;
     samples.release(); pads.fill(undefined);
     resetControls();
@@ -714,6 +752,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       trackingOriginPending = true;
       await renderer.xr.setSession(session);
       if (closed || activeSession !== session) return;
+      startHeadsetObserver();
       enter.disabled = false;
       enter.textContent = 'Exit headset';
       visibilityChanged();
@@ -772,6 +811,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     activeSession = headset.session;
     activeSession.addEventListener('visibilitychange', visibilityChanged);
     floorOffset = headset.reference === 'local-floor' ? 0 : eyeHeight;
+    headset.session.updateRenderState({depthNear:camera.near,depthFar:camera.far});
+    startHeadsetObserver();
     trackingOriginPending = true;
     enter.textContent = 'Exit headset';
     enter.disabled = false;
@@ -803,7 +844,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   options.onPrepared(entry => {
     if (closed || entry.opacity <= 0) return;
     // Crossfade to the independent camera at the chosen lunar site.
-    rig.position.copy(mission.eye);rig.quaternion.copy(mission.viewRotation);
+    rig.position.copy(mission.observer.eye);rig.quaternion.copy(mission.observer.rotation);
     camera.position.set(0,0,0);camera.rotation.set(0,0,0);
     ground.group.visible=prints.group.visible=dust.mesh.visible=true;
     sky.material.uniforms.uEarth.value.w=site.earth?.angularRadius??0;
@@ -839,6 +880,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       choosingLanding = false;
       if (!closed) {
         prevTime = 0;
+        if(activeSession===session)session.updateRenderState({depthNear:camera.near,depthFar:camera.far});
         trackingOriginPending = !!activeSession;
         visibilityChanged();
         renderer.setAnimationLoop(walkFrame);
@@ -888,6 +930,13 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         }
       }
       const { position, orientation } = pose.transform;
+      headOrientation.set(orientation.x, orientation.y, orientation.z, orientation.w);
+      if(alignToLanding && mission.view==='Surface'){
+        // Calibrate once using the actual headset heading. Room-scale tracking runs freely afterwards.
+        surfaceHeading=desktopYaw-headsetYaw(headOrientation);
+        rig.rotation.set(0,surfaceHeading,0);
+        alignToLanding=false;
+      }
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
       if (trackingOriginPending) {
@@ -895,7 +944,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         rig.position.z = targetZ - headOffset.z;
         trackingOriginPending = false;
       }
-      headOrientation.set(orientation.x, orientation.y, orientation.z, orientation.w);
       forwardDir.set(0, 0, -1).applyQuaternion(headOrientation).applyAxisAngle(worldUp, rig.rotation.y);
       if (forwardDir.y < -.78 || Math.hypot(forwardDir.x,forwardDir.z) < .12) {
         // Looking straight at the soles still has a well-defined heading from the headset's right axis.
@@ -980,38 +1028,39 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       }
       if (planet) {
         planet.mesh.visible = orbital;
-        if (orbital) planet.place(mission.observer.centre,mission.eye);
+        if (orbital) planet.place(mission.observer.centre,mission.observer.eye);
       }
-      ground.group.visible=prints.group.visible=dust.mesh.visible=!mission.flightVisible && !orbital;
-      sky.material.uniforms.uEarth.value.w=mission.flightVisible?0:site.earth?.angularRadius??0;
-      sky.material.uniforms.uStarGain.value=mission.view==='Surface'?(site.starGain??1):(mission.flightVisible || sun.y>0?.035:.22);
-      if(mission.flightVisible || orbital)glare.mesh.visible=false;
-      if(!mission.inSpace && !orbital && sunlight.castShadow && (!mission.atRest || !finalMissionShadow)){
+      ground.group.visible=prints.group.visible=dust.mesh.visible=!orbital;
+      sky.material.uniforms.uStarGain.value=mission.view==='Surface'?(site.starGain??1):(sun.y>0?.035:.22);
+      if(orbital)glare.mesh.visible=false;
+      const observingLander=mission.view==='Outside' || Math.hypot(targetX-landingX,targetZ-landingZ)<25;
+      if(!mission.inSpace && !orbital && sunlight.castShadow && observingLander &&
+          (!mission.atRest || !finalMissionShadow || Math.hypot(shadowX-mission.focus.x,shadowZ-mission.focus.z)>2)){
         finalMissionShadow=mission.atRest;
-        sunlight.target.position.copy(mission.focus);
-        sunlight.target.position.y=ground.floorAt(mission.focus.x,mission.focus.z);
-        sunlight.position.copy(sunlight.target.position).addScaledVector(sun,50);
-        sunlight.shadow.needsUpdate=true;shadowX=shadowZ=Infinity;
+        placeShadow(mission.focus.x,mission.focus.z);
       }
-      if(mission.view!=='Surface'){
-        if (mission.view==='Outside' && !orbital && Math.hypot(mission.eye.x-landingX,mission.eye.z-landingZ)<250) {
-          ground.update(mission.eye.x,mission.eye.z);
+      if(mission.view==='Outside'){
+        if (!orbital && Math.hypot(mission.observer.eye.x-landingX,mission.observer.eye.z-landingZ)<250) {
+          ground.update(mission.observer.eye.x,mission.observer.eye.z);
         }
-        rig.quaternion.copy(mission.viewRotation);
+        rig.quaternion.copy(mission.observer.rotation);
         if(viewer){
           if(captureOrigin){
-            missionOrigin.copy(viewer.transform.position);captureOrigin=false;
+            missionOrigin.copy(viewer.transform.position);
+            outsideHeading.setFromAxisAngle(worldUp,-headsetYaw(headOrientation));
+            captureOrigin=false;
           }
-          rig.position.copy(mission.eye).sub(missionHead.copy(missionOrigin).applyQuaternion(rig.quaternion));
+          rig.quaternion.multiply(outsideHeading);
+          rig.position.copy(mission.observer.eye).sub(missionHead.copy(missionOrigin).applyQuaternion(rig.quaternion));
         }else{
-          rig.position.copy(mission.eye);camera.position.set(0,0,0);
-          camera.rotation.set(mission.view==='Cockpit'?missionLookY:0,mission.view==='Cockpit'?missionLookX:0,0,'YXZ');
+          rig.position.copy(mission.observer.eye);camera.position.set(0,0,0);
+          camera.rotation.set(0,0,0);
         }
-        if(mission.view==='Outside' && !orbital){
+        if(!orbital){
           glareLook.set(0,0,-1);
           if(viewer)glareLook.applyQuaternion(headOrientation);
           glareLook.applyQuaternion(rig.quaternion);
-          glare.update(mission.eye,sun,site.sunAngularRadius??.00465,site.height,glareLook,dt);
+          glare.update(mission.observer.eye,sun,site.sunAngularRadius??.00465,site.height,glareLook,dt);
           applySunlight();
         }
         wrist.hide();renderer.render(scene,camera);return;
@@ -1065,12 +1114,10 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       travelX,travelZ,dt,gait.inFlight,gait.lift,gait.jumping || landedJump,floorAt,grips,loadSoil,gait.touchdownSpeed,bedAt);
     dust.update(dt);
     prints.update(targetX,targetZ);
-    // The static rocks need a new shadow map only when the nearby patch changes.
-    if (sunlight.castShadow && (Math.abs(targetX - shadowX) > 2 || Math.abs(targetZ - shadowZ) > 2)) {
-      shadowX = targetX; shadowZ = targetZ;
-      sunlight.target.position.set(targetX, ground.floorAt(targetX, targetZ), targetZ);
-      sunlight.position.copy(sunlight.target.position).addScaledVector(sun, 50);
-      sunlight.shadow.needsUpdate = true;
+    // Keep the craft and its shadow together during approach; return shadow coverage to the walker on departure.
+    const watchingLanding=missionLocal && !mission.inSpace && Math.hypot(targetX-landingX,targetZ-landingZ)<25;
+    if(sunlight.castShadow && !watchingLanding && (Math.abs(targetX-shadowX)>2 || Math.abs(targetZ-shadowZ)>2)){
+      placeShadow(targetX,targetZ);
     }
     if(time-lastLocationTime>300) {
       const position = site.height.coordinates(targetX,targetZ);
