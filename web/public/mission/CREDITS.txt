@@ -1,26 +1,13 @@
-Apollo spacecraft models
+Apollo spacecraft model
 
 NASA / Michael D. Carbajal
 Apollo Lunar Module
 https://science.nasa.gov/3d-resources/apollo-lunar-module/
 
-Saturn V
-https://science.nasa.gov/3d-resources/saturn-v/
-
-Apollo Soyuz, Apollo command and service module portion
-https://science.nasa.gov/3d-resources/apollo-soyuz/
-
-Moon viewer adaptations include real-world scaling, lower mesh density, consolidated materials, thermal blanket surface detail, window materials, and separable Saturn V stages. The command and service module represents the Apollo spacecraft family.
+Moon viewer adaptations include real-world scaling, lower mesh density, consolidated materials, thermal blanket surface detail and window materials.
 
 Apollo 11 press kit, dimensional reference
 https://science.nasa.gov/wp-content/uploads/2023/09/Apollo_11.pdf
-
-Earth during departure
-NASA Goddard Space Flight Center Scientific Visualization Studio
-Blue Marble land and ocean imagery courtesy of Reto Stöckli and NASA Earth Observatory.
-The 4096 × 2048 mission texture combines the eastern and western Blue Marble maps with the cloud field extracted from the matching cloudy and cloud-free Earth composites.
-https://svs.gsfc.nasa.gov/2915/
-https://svs.gsfc.nasa.gov/3615/
 
 Touchdown mass properties and footpad radius follow the nominal Apollo LM in NASA NTRS 20260001760, tables 1 and 2. The interactive model approximates the gear and hull with rigid contacts on the rendered terrain.
 https://ntrs.nasa.gov/citations/20260001760
