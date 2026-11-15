@@ -17,6 +17,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import type { OrbitalRocks } from './terrain/orbitalRocks';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { GlobeControls } from './controls';
 import { HelmetAudio } from './helmetAudio';
@@ -328,6 +329,29 @@ async function main() {
   let drawApproach: ((entry: LandingFrame) => void) | undefined;
   let surfaceStars: Texture | undefined;
 
+  let rocks: OrbitalRocks | undefined;
+  let nextDetailLoad = 0;
+  function loadSurfaceDetail() {
+    if (performance.now() < nextDetailLoad) return;
+    nextDetailLoad = Infinity;
+    const retry = (error: unknown) => {
+      console.warn('Orbital surface detail', error);
+      nextDetailLoad = performance.now() + 15000;
+    };
+    if (!tree.grainMaps) void import('./lunarSoil').then(m => m.loadGrainMaps()).then(maps => {
+      tree.grainMaps = maps;
+      needsRender = true;
+    }).catch(retry);
+    if (!rocks) void Promise.all([
+      import('./terrain/orbitalRocks'),
+      import('./lunarRocks').then(m => m.loadRockSamples()),
+      import('./rockAtlas').then(m => m.loadRockAtlas()),
+    ]).then(([{ OrbitalRocks }, samples, atlas]) => {
+      rocks = new OrbitalRocks(atlas, samples);
+      needsRender = true;
+    }).catch(retry);
+  }
+
   let needsRender = true;
   tree.onChange = () => (needsRender = true);
 
@@ -461,6 +485,14 @@ async function main() {
     const dPivot = Math.hypot(st.camPos[0] - pv[0], st.camPos[1] - pv[1], st.camPos[2] - pv[2]);
     hud.setScale((dPivot * 2 * Math.tan(fov / 2)) / lodH);
     for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
+    if (dPivot < 6500 && !flightFrame) {
+      loadSurfaceDetail();
+      if (rocks && !overlay?.enabled) {
+        dummyCam.projectionMatrix.copy(proj);
+        rocks.update(tiles, fi, LIGHT, LIGHT_PARAMS, alt, aspect);
+        scene.add(rocks.group);
+      }
+    }
     if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
     renderer.render(scene, dummyCam);
