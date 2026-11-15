@@ -8,18 +8,9 @@ import type { FeasibilityOverlay, FeasLookup } from './FeasibilityOverlay';
 // The same ancestor tile and bilinear sampling are used for the tint and the readout.
 export class VrFeasibility {
   readonly level: number;
-  private released?: XRInputSource;
 
-  constructor(readonly overlay: FeasibilityOverlay, private toggle: () => void) {
+  constructor(readonly overlay: FeasibilityOverlay, readonly toggle: () => void) {
     this.level = Math.min(1, overlay.meta.maxLevel);
-  }
-
-  input(session?: XRSession) {
-    const left = session && Array.from(session.inputSources).find(input =>
-      input.handedness === 'left' && input.gamepad?.mapping === 'xr-standard');
-    if (!left?.gamepad) { this.released = undefined; return; }
-    if (!left.gamepad.buttons[0]?.pressed) this.released = left;
-    else if (this.released === left) { this.released = undefined; this.toggle(); }
   }
 
   reading(direction: Vec3) {

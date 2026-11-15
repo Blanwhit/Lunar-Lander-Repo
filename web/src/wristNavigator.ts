@@ -112,8 +112,7 @@ export class WristNavigator {
       if (scores.overlay.enabled) {
         const here=terrain.coordinates(x,z);
         line(scores.reading(latLonToDir(here.lat,here.lon)),430,33,'#edf4ec');
-        c.textAlign='right'; c.font='500 24px system-ui'; c.fillText('Left trigger · Hide',616,430); c.textAlign='left';
-      } else line('Left trigger · Show feasibility',430,29,'#c7daa0');
+      } else line('Feasibility off',430,29,'#c7daa0');
     }
     this.texture.needsUpdate=true;
   }
