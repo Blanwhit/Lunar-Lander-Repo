@@ -11,6 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
+import type { GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
 import { HandSamples } from './handSamples';
 import { WristNavigator } from './wristNavigator';
@@ -37,6 +38,7 @@ interface WalkSite {
   earth?: { direction: Vector3; angularRadius: number; sunDirection: Vector3; gmst: number; texture?: Texture };
 }
 export interface WalkOptions extends WalkSite {
+  headset?: GlobeHeadset;
   audio: HelmetAudio;
   siteAt:(lat:number,lon:number)=>Promise<WalkSite>;
   onPrepared: (draw: (entry: LandingFrame) => void) => void;
@@ -186,8 +188,8 @@ export function prefetchWalk() {
 
 /** Open an eye-level desktop preview. Headset permission is requested by Enter headset. */
 export async function startWalk(container: HTMLElement, options: WalkOptions): Promise<void> {
-  const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+  const renderer = options.headset?.renderer ?? new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  if (!options.headset) renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
   renderer.xr.enabled = true;
   renderer.xr.setFoveation(0);
   const camera = new PerspectiveCamera(70, 1, 0.10, WALK_FAR);
@@ -244,8 +246,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     sky.geometry.dispose();
     sky.material.dispose();
     glare.dispose();
-    renderer.dispose();
-    renderer.forceContextLoss();
+    if (!options.headset) { renderer.dispose(); renderer.forceContextLoss(); }
     throw err;
   }
   const rockAtlas = await loadRockAtlas();
@@ -619,6 +620,25 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   exit.addEventListener('click', leave, listener);
   enter.addEventListener('click', toggleXR, listener);
   resetDesktop();
+  // The globe picker keeps drawing while the surface loads. Take over its session
+  // and frame loop together so the wearer arrives without a second permission prompt.
+  const headset = options.headset;
+  if (headset && renderer.xr.getSession() === headset.session && renderer.xr.isPresenting) {
+    activeSession = headset.session;
+    activeSession.addEventListener('visibilitychange', visibilityChanged);
+    floorOffset = headset.reference === 'local-floor' ? 0 : eyeHeight;
+    trackingOriginPending = true;
+    enter.textContent = 'Exit headset';
+    enter.disabled = false;
+    overlay.style.opacity = '1';
+    overlay.inert = false;
+    bar.hidden = false;
+    arriving = false;
+    options.onArrived();
+    visibilityChanged();
+    renderer.setAnimationLoop(walkFrame);
+    return;
+  }
   // Upload the walking scene behind the globe before starting the dissolve.
   // (textures, programs and buffers in separate tasks, so the flight keeps animating)
   await uploadTextures(renderer, scene);
