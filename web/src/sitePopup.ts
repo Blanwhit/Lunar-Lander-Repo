@@ -125,7 +125,7 @@ export class SitePopup {
       <button type="button" class="close" aria-label="Close">×</button>
       <div class="coords"><span class="k">Coordinates:</span><span class="v"></span></div>
       <div class="feas"></div>
-      <div class="btns"><button type="button" data-act="info">More info</button><button type="button" data-act="vr">Enter VR</button></div>`;
+      <div class="btns"><button type="button" data-act="info">More info</button><button type="button" data-act="vr">Fly landing mission</button></div>`;
     this.coords = el.querySelector('.coords .v') as HTMLSpanElement;
     this.feas = el.querySelector('.feas') as HTMLDivElement;
     (el.querySelector('.close') as HTMLButtonElement).addEventListener('click', () => this.close());
