@@ -4,6 +4,7 @@ import {
   SphereGeometry, SRGBColorSpace, TextureLoader, Vector3, WebGLRenderer,
 } from 'three';
 
+import { VrFeasibilityButton } from './overlay/vrFeasibilityButton';
 import { VrHeatmap, type VrFeasibility } from './overlay/vrFeasibility';
 
 export interface GlobeHeadset {
@@ -39,6 +40,8 @@ export async function pickLandingInVR(session: XRSession, latitude: number, long
 export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSession,
   latitude: number, longitude: number, land: (lat: number, lon: number) => Promise<boolean | void>, scores?: VrFeasibility) {
   const scene = new Scene(), camera = new PerspectiveCamera(65, 1, .025, 10);
+  const scoreButton = scores && new VrFeasibilityButton(scores);
+  if (scoreButton) scene.add(scoreButton.mesh);
   const stand = new Group();
   scene.add(stand);
   const map = new TextureLoader().load(import.meta.env.BASE_URL + 'lunar-soil/global-albedo.jpg');
@@ -82,11 +85,11 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
     text.needsUpdate = true;
   }
   const controls = 'Left stick rotates · X lands · Y returns from the surface';
-  const toggleHint = scores ? 'Left trigger toggles feasibility' : '';
-  caption('Point with your left controller', controls, toggleHint);
+  caption('Point with your left controller', controls);
 
   let selected = false, landingFailed = false;
   function release() {
+    scoreButton?.dispose();
     heatmap?.dispose();
     moon.geometry.dispose(); moon.material.dispose(); map.dispose();
     dot.geometry.dispose(); dot.material.dispose();
@@ -107,7 +110,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
         if (!space || !frame) return;
         const pose = frame.getViewerPose(space);
         if (!pose || session.visibilityState !== 'visible') {
-          scores?.input();
+          scoreButton?.hide();
           previousSource = undefined;
           dot.visible = beam.visible = false;
           return;
@@ -126,7 +129,6 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
         const dt = MathUtils.clamp((time - lastTime) / 1000, 0, .05);
         lastTime = time;
         if (!selected) {
-          scores?.input(session);
           if (scores?.overlay.enabled && !heatmap) {
             heatmap = new VrHeatmap(scores,radius);
             moon.add(heatmap.group);
@@ -144,9 +146,10 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
           if (Math.abs(x) > .15) moon.rotation.y += x * dt * 1.6;
           if (Math.abs(y) > .15) moon.rotation.x = MathUtils.clamp(moon.rotation.x + y * dt * 1.6, -Math.PI / 2, Math.PI / 2);
           const aim = left && frame.getPose(left.targetRaySpace, space);
-          beam.visible = !!aim;
+          const overButton = scoreButton?.update(pose, left, aim);
+          beam.visible = !!aim && !overButton;
           dot.visible = false;
-          if (aim) {
+          if (aim && !overButton) {
             ray.origin.copy(aim.transform.position);
             ray.direction.set(0, 0, -1).applyQuaternion(aim.transform.orientation);
             const onMoon = ray.intersectSphere(bounds, hit);
@@ -165,6 +168,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
             }
             if (click && onMoon) {
               selected = true;
+              scoreButton?.hide();
               landingFailed = false;
               const lat = MathUtils.radToDeg(Math.asin(MathUtils.clamp(local.y, -1, 1)));
               const lon = MathUtils.radToDeg(Math.atan2(-local.z, local.x));
@@ -186,7 +190,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
             }
           }
           if (!selected) caption(title, landingFailed ? 'Terrain could not load · Press X to try again' : controls, scores?.overlay.enabled
-            ? 'Red 0% · Yellow 50% · Green 100%   |   Left trigger hides scores' : toggleHint);
+            ? 'Red 0% · Yellow 50% · Green 100%' : '');
         }
         renderer.render(scene, camera);
       });

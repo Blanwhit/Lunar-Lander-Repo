@@ -11,6 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
+import { VrFeasibilityButton } from './overlay/vrFeasibilityButton';
 import type { VrFeasibility } from './overlay/vrFeasibility';
 import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
@@ -271,6 +272,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const canvas = renderer.domElement;
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-label', 'Lunar surface, first-person view');
+  const scoreButton = options.vrScores && new VrFeasibilityButton(options.vrScores);
+  if (scoreButton) rig.add(scoreButton.mesh);
   const bar = document.createElement('div');
   bar.className = 'walk-bar';
   bar.innerHTML = `<div class="walk-actions"><button type="button" class="walk-enter">Enter headset</button><button type="button" class="walk-touch">Hold to walk</button><button type="button" class="walk-exit">Exit VR</button></div><p class="walk-help walk-position"></p><p class="walk-help walk-controls"></p><p class="walk-status" role="status"></p>`;
@@ -291,6 +294,20 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   help.textContent = desktopControls+' Click or tap terrain to travel there.';
   const abort = new AbortController();
   const listener = { signal: abort.signal };
+  const scores = options.vrScores;
+  const screenToggle = document.createElement('button');
+  const syncScreenToggle = () => {
+    if (!scores) return;
+    const enabled = scores.overlay.enabled;
+    screenToggle.textContent = 'Feasibility ' + (enabled ? 'on' : 'off');
+    screenToggle.setAttribute('aria-pressed', String(enabled));
+    lastLocationTime = -Infinity;
+  };
+  if (scores) {
+    screenToggle.type = 'button';
+    enter.after(screenToggle);
+    screenToggle.addEventListener('click', () => { scores.toggle(); syncScreenToggle(); }, listener);
+  }
   let activeSession: XRSession | null = null;
   let pendingSession = false;
   let arriving = true;
@@ -344,6 +361,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let returnArmed: XRInputSource | undefined;
   let queuedHit:Vector3|undefined;
   let lastLocationTime=-Infinity;
+  syncScreenToggle();
   const regions: {origin:SurfaceLocation; frame:Matrix4; trail:ReturnType<WalkFootprints['takeTrail']>}[]=[];
   const latLon=(p:SurfaceLocation) => `${Math.abs(p.lat).toFixed(5)}°${p.lat<0?'S':'N'}  ${Math.abs(p.lon).toFixed(5)}°${p.lon<0?'W':'E'}`;
   const formatPosition=(p:SurfaceLocation) => `${latLon(p)} · ${Math.round(p.elevation).toLocaleString()} m elevation · ~${Math.round(p.resolution).toLocaleString()} m grid`;
@@ -442,7 +460,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   function resetControls() {
     returnArmed = undefined;
-    options.vrScores?.input();
+    scoreButton?.hide();
     keys.clear();
     gait.reset();
     jumpHeld = false;
@@ -557,6 +575,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (closed) return;
     if (choosingLanding) renderer.setAnimationLoop(walkFrame);
     enter.textContent = 'Enter headset';
+    syncScreenToggle();
     help.textContent = desktopControls+' Click or tap terrain to travel there.';
     resetDesktop();
     void checkSupport();
@@ -630,6 +649,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     sky.material.dispose();
     glare.dispose();
     sunlight.dispose();
+    scoreButton?.dispose();
     samples.dispose(); wrist.dispose();
     suit.dispose();
     prints.dispose();
@@ -728,11 +748,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       const pose = space && frame.getViewerPose(space);
       if (!pose || activeSession.visibilityState !== 'visible') {
         returnArmed = undefined;
-        options.vrScores?.input();
+        scoreButton?.hide();
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
-      options.vrScores?.input(activeSession);
+      if (scoreButton) {
+        const left = Array.from(activeSession.inputSources).find(source =>
+          source.handedness === 'left' && source.gamepad?.mapping === 'xr-standard');
+        scoreButton.update(pose, left, left && frame.getPose(left.targetRaySpace, space!));
+      }
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
@@ -869,7 +893,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
     if(time-lastLocationTime>300) {
       const position = site.height.coordinates(targetX,targetZ);
-      positionLabel.textContent = formatPosition(position) + ' · ' + describeRocks(rockAtlas.read(position.lat, position.lon));
+      positionLabel.textContent = formatPosition(position) + ' · ' + describeRocks(rockAtlas.read(position.lat, position.lon))
+        + (!activeSession && scores?.overlay.enabled ? ' · ' + scores.reading(latLonToDir(position.lat,position.lon)) : '');
       lastLocationTime=time;
     }
     if(!relocating && !refreshing && Math.hypot(targetX-anchorX,targetZ-anchorZ)>160) {
