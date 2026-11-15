@@ -11,7 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
-import type { GlobeHeadset } from './globePicker';
+import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
 import { HandSamples } from './handSamples';
 import { WristNavigator } from './wristNavigator';
@@ -336,16 +336,19 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (!boot.onStone) prints.press(boot,scale,contactDt,dust);
   }
 
-  let anchorX=0,anchorZ=0,relocating=false,refreshing=false;
+  let anchorX=0,anchorZ=0,relocating=false;
+  let refreshing: Promise<void> | undefined;
+  let choosingLanding = false;
+  let returnArmed: XRInputSource | undefined;
   let queuedHit:Vector3|undefined;
   let lastLocationTime=-Infinity;
   const regions: {origin:SurfaceLocation; frame:Matrix4; trail:ReturnType<WalkFootprints['takeTrail']>}[]=[];
   const latLon=(p:SurfaceLocation) => `${Math.abs(p.lat).toFixed(5)}°${p.lat<0?'S':'N'}  ${Math.abs(p.lon).toFixed(5)}°${p.lon<0?'W':'E'}`;
   const formatPosition=(p:SurfaceLocation) => `${latLon(p)} · ${Math.round(p.elevation).toLocaleString()} m elevation · ~${Math.round(p.resolution).toLocaleString()} m grid`;
-  function localPoint(frame:Matrix4,point:SurfaceLocation) {
+  function localPoint(frame:Matrix4,point:{lat:number;lon:number;elevation?:number}) {
     const dir=new Vector3(...latLonToDir(point.lat,point.lon)).applyMatrix4(frame.clone().transpose());
     if(dir.y<=0)return;
-    return new Vector2((R_MOON+point.elevation)*dir.x,(R_MOON+point.elevation)*dir.z);
+    return new Vector2((R_MOON+(point.elevation ?? 0))*dir.x,(R_MOON+(point.elevation ?? 0))*dir.z);
   }
   function updateLighting(at:WalkSite) {
     sky.removeFromParent();sky.geometry.dispose();sky.material.dispose();
@@ -354,26 +357,36 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     applySunlight();
     shadowX=shadowZ=Infinity;
   }
-  async function travelTo(hit:Vector3) {
-    if(relocating || closed)return;
-    if(refreshing){queuedHit=hit;return;}
+  async function travelTo(hit:Vector3 | {lat:number; lon:number}, session?:XRSession) {
+    if (relocating || closed) return false;
+    const cancelled = () => closed || (!!session && activeSession !== session);
+    if (refreshing) {
+      if (hit instanceof Vector3) { queuedHit=hit; return false; }
+      await refreshing;
+      if (cancelled()) return false;
+    }
     relocating=true;
-    const destination=site.height.coordinates(hit.x,hit.z);
-    status.textContent='Preparing terrain at '+formatPosition(destination);
+    const destination = hit instanceof Vector3 ? site.height.coordinates(hit.x,hit.z) : hit;
+    status.textContent='Preparing terrain';
     resetControls();
-    let x=hit.x,z=hit.z;
+    const local = hit instanceof Vector3 ? new Vector2(hit.x,hit.z) : localPoint(site.landingToBody, destination);
+    let x=local?.x ?? 0,z=local?.y ?? 0;
     try {
-      if(Math.hypot(x,z)>3500) {
+      if(!local || local.length()>3500) {
         // Re-establish true local vertical on long journeys. Restore regolith if this is a return visit.
         const prior=regions.find(r=>{const v=localPoint(r.frame,destination);return v && v.length()<3000;});
         const origin=prior?.origin ?? destination;
         const next=await options.siteAt(origin.lat,origin.lon);
-        if(closed)return;
-        const coord=prior ? localPoint(next.landingToBody,destination)! : new Vector2();
+        if(cancelled())return false;
+        let coord=prior ? localPoint(next.landingToBody,destination)! : new Vector2();
+        if(prior) {
+          await next.height.prepare(coord.x,coord.y);
+          const { elevation } = next.height.coordinates(coord.x,coord.y);
+          coord = localPoint(next.landingToBody, { ...destination, elevation })!;
+        }
         x=coord.x;z=coord.y;
-        if(prior)await next.height.prepare(x,z);
         const newGround=await groundFor(next,x,z);
-        if(closed){newGround.dispose();return;}
+        if(cancelled()){newGround.dispose();return false;}
         const trail=prints.takeTrail();
         regions.push({origin:site.height.coordinates(0,0),frame:site.landingToBody,trail});
         // Transport the viewing direction between the two east/north frames.
@@ -390,10 +403,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         anchorX=x;anchorZ=z;
       } else {
         const improved=await site.height.prepare(x,z);
-        if(closed)return;
+        if(cancelled())return false;
+        if (!(hit instanceof Vector3)) {
+          const { elevation } = site.height.coordinates(x,z);
+          const exact = localPoint(site.landingToBody, { ...destination, elevation })!;
+          x=exact.x;z=exact.y;
+        }
         if(improved || Math.hypot(x-anchorX,z-anchorZ)>80) {
           await ground.prepareLanding(x,z,improved);
-          if(closed)return;
+          if(cancelled())return false;
           prints.rebuildSurface();anchorX=x;anchorZ=z;
         }
       }
@@ -402,9 +420,11 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       if(!activeSession)resetDesktop();
       suit.resetFeet();gait.reset();lastLocationTime=-Infinity;
       status.textContent='';
+      return true;
     } catch(error) {
       console.error('Surface travel failed',error);
       if(!closed)status.textContent='Terrain could not load. Try selecting the location again.';
+      return false;
     } finally {relocating=false;}
   }
 
@@ -419,6 +439,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   }
   function resetControls() {
+    returnArmed = undefined;
     keys.clear();
     gait.reset();
     jumpHeld = false;
@@ -519,7 +540,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (closed || check !== supportCheck || pendingSession || activeSession) return;
     enter.disabled = !supported;
     if (supported) {
-      status.textContent = 'Quest 2 · Left stick moves, left grip runs, right stick turns, A jumps and right trigger sprints. Right grip holds a loose rock. Hold B to aim, release to mark. Raise your left wrist to read it.';
+      status.textContent = 'Quest 2 · Left stick moves, left grip runs, right stick turns, A jumps and right trigger sprints. Right grip holds a loose rock. Hold B to aim, release to mark. Raise your left wrist to read it. Press Y to return to the globe.';
     } else {
       showHeadsetHint();
     }
@@ -531,6 +552,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     samples.release(); pads.fill(undefined);
     resetControls();
     if (closed) return;
+    if (choosingLanding) renderer.setAnimationLoop(walkFrame);
     enter.textContent = 'Enter headset';
     help.textContent = desktopControls+' Click or tap terrain to travel there.';
     resetDesktop();
@@ -577,7 +599,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       enter.textContent = 'Exit headset';
       visibilityChanged();
       status.textContent = '';
-      help.textContent = 'Left stick moves. Hold left grip to run. A jumps. Right stick turns. Hold the right trigger to sprint. Right grip picks up a rock within reach. Hold B and release to mark a ridge. Raise your left wrist to check it.';
+      help.textContent = 'Left stick moves. Hold left grip to run. A jumps. Right stick turns. Hold the right trigger to sprint. Right grip picks up a rock within reach. Hold B and release to mark a ridge. Raise your left wrist to check it. Press Y to return to the globe.';
     } catch (error) {
       await session?.end().catch(() => {});
       if (!closed) {
@@ -669,6 +691,25 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   });
 
+  async function returnToGlobe(session: XRSession) {
+    choosingLanding = true;
+    queuedHit = undefined;
+    suspendTools();
+    const location = site.height.coordinates(targetX,targetZ);
+    try {
+      await showLandingGlobe(renderer, session, location.lat, location.lon,
+        (lat, lon) => travelTo({lat, lon}, session));
+    } finally {
+      choosingLanding = false;
+      if (!closed) {
+        prevTime = 0;
+        trackingOriginPending = !!activeSession;
+        visibilityChanged();
+        renderer.setAnimationLoop(walkFrame);
+      }
+    }
+  }
+
   function walkFrame(time:number, frame?:XRFrame) {
     if (closed) return;
     const dt = prevTime ? MathUtils.clamp((time - prevTime) / 1000, 0, 0.1) : 0;
@@ -683,6 +724,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       const space = renderer.xr.getReferenceSpace();
       const pose = space && frame.getViewerPose(space);
       if (!pose || activeSession.visibilityState !== 'visible') {
+        returnArmed = undefined;
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
@@ -713,7 +755,14 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
             const pressure = trigger?.value ?? (trigger?.pressed ? 1 : 0);
             sprint = Math.max(0, (pressure - .12) / .88);
           }
-          if (input.handedness === 'left') running = !!pad.buttons[1]?.pressed;
+          if (input.handedness === 'left') {
+            running = !!pad.buttons[1]?.pressed;
+            if (!pad.buttons[5]?.pressed) returnArmed = input;
+            else if (returnArmed === input && !choosingLanding && !relocating) {
+              void returnToGlobe(activeSession).catch(error => console.warn('VR globe unavailable', error));
+              return;
+            }
+          }
         }
         const gripPose = input.gripSpace && space && frame.getPose(input.gripSpace, space);
         if (gripPose && input.handedness !== 'none') {
@@ -821,16 +870,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if(!relocating && !refreshing && Math.hypot(targetX-anchorX,targetZ-anchorZ)>160) {
       if(Math.hypot(targetX,targetZ)>3500)void travelTo(new Vector3(targetX,0,targetZ));
       else {
-        refreshing=true;
         const x=targetX,z=targetZ;
-        void (async()=>{
+        refreshing=(async()=>{
           try {
             const improved=await site.height.prepare(x,z);
             if(closed)return;
             await ground.prepareLanding(x,z,improved);
             if(!closed){prints.rebuildSurface();anchorX=x;anchorZ=z;shadowX=Infinity;}
           } finally {
-            refreshing=false;
+            refreshing=undefined;
             if(queuedHit){const hit=queuedHit;queuedHit=undefined;void travelTo(hit);}
           }
         })().catch(error=>console.warn('Could not refine walk terrain',error));
