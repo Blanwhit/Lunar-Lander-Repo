@@ -9,9 +9,15 @@
 //  3. gates on critical categories: g = 1 if s >= tau else (s/tau)^k;
 //     final = clamp(G * M, 1, 100), G = product of gates (0 on any knockout)
 //
+// One penalty for weak categories, not three stacked ones: the default is the geometric
+// mean (p = 0) with soft Power/Comms gates (tau = 10, k = 1), which only bite when a category
+// is nearly absent. Power and Comms are scored for equipment on a mast (panel / antenna
+// height above the ground) and count a body as visible down to horizonToleranceDeg below the
+// terrain horizon (DEM error at the ~20 m polar grid, diffraction at grazing angles).
+//
 // All numbers below are PLACEHOLDERS to be replaced by the lander's real tolerances.
-// With p < 0 any sub-score near 0 drags its whole category down regardless of its weight,
-// so curves of non-critical factors (temperature, prominence) keep a non-zero floor.
+// Any sub-score near 0 drags its whole category down regardless of its weight, so curves of
+// non-critical factors (temperature, prominence) keep a non-zero floor.
 
 export type Curve = [x: number, utility: number][]; // breakpoints, x ascending
 
@@ -32,7 +38,13 @@ export type FactorKey = PowerKey | CommsKey | LandingKey;
 export type Category = 'power' | 'comms' | 'landing';
 
 export interface FeasibilityConfig {
-  p: number; // power-mean exponent (used inside categories and across categories)
+  p: number; // power-mean exponent (used inside categories and across categories; 0 = geometric)
+  /** height of the solar panel above the ground for the Power inputs (m) */
+  panelHeightM: number;
+  /** height of the Earth antenna above the ground for the Comms inputs (m) */
+  antennaHeightM: number;
+  /** a body counts as visible while its margin above the terrain horizon is > -this (deg) */
+  horizonToleranceDeg: number;
   categoryWeights: Record<Category, number>;
   gates: Record<Category, { tau: number; k: number } | null>;
   factors: {
@@ -55,9 +67,14 @@ export interface FeasibilityResult {
 
 const H = 1, D = 24; // hours, days
 export const DEFAULT_FEASIBILITY: FeasibilityConfig = {
-  p: -2,
+  p: 0,
+  // the overlay's horizons and annual statistics are baked by pipeline/feasibility_grid.py at
+  // one mast height (MAST_H) and tolerance (HORIZON_TOL): keep those equal to these
+  panelHeightM: 10,
+  antennaHeightM: 10,
+  horizonToleranceDeg: 0.4,
   categoryWeights: { comms: 0.25, power: 0.25, landing: 0.5 },
-  gates: { landing: { tau: 40, k: 2 }, power: { tau: 20, k: 2 }, comms: { tau: 20, k: 2 } },
+  gates: { landing: { tau: 40, k: 2 }, power: { tau: 10, k: 1 }, comms: { tau: 10, k: 1 } },
   factors: {
     power: {
       sunVisibleNow: { weight: 0.35, curve: [[0, 0], [1, 100]], label: 'Sun visible now', unit: 'disc fraction' },

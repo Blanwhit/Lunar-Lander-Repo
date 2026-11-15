@@ -468,24 +468,69 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
   }
 
   /**
-   * Feasibility "annual" statistics over the fixed reference year (6 h samples); they don't
-   * depend on the query time, so they are cached per site like the horizon.
+   * Feasibility "annual" statistics over the fixed reference year (6 h samples): mean visible
+   * solar-disc fraction with the Sun's margin raised by `sunTol`, and the fraction of time the
+   * Earth's centre is above the horizon + `earthMask`. They don't depend on the query time,
+   * so they are cached per site like the horizon.
    */
-  async function refYear(lat: number, lon: number, hObs: number, mask: number, geo: (t: number) => Promise<Geo>) {
-    const refKey = `${lat.toFixed(7)},${lon.toFixed(7)},${hObs},${mask}`;
+  async function refYear(lat: number, lon: number, hObs: number, sunTol: number, earthMask: number,
+    geo: (t: number) => Promise<Geo>) {
+    const refKey = `${lat.toFixed(7)},${lon.toFixed(7)},${hObs},${sunTol},${earthMask}`;
     let ref = refYearCache.get(refKey);
     if (!ref) {
       let s = 0, e = 0, n = 0;
       for (let t = Date.UTC(FEAS_REF_YEAR, 0, 1); t < Date.UTC(FEAS_REF_YEAR + 1, 0, 1); t += 6 * 3600e3) {
         const g = await geo(t);
         n++;
-        s += g.sun.visibleFraction;
-        if (g.earth.marginDeg - mask > 0) e++;
+        s += discFractionAbove(g.sun.marginDeg + sunTol, g.sun.angularRadiusDeg);
+        if (g.earth.marginDeg - earthMask > 0) e++;
       }
       ref = { sun: s, earth: e, n };
       refYearCache.set(refKey, ref);
     }
     return ref;
+  }
+
+  /** the same site seen from another height above the ground (a panel or antenna mast) */
+  async function atHeight(ctx: SiteCtx, lat: number, lon: number, h: number, check: () => void): Promise<SiteCtx> {
+    check();
+    const hp = await horizon(lat, lon, h);
+    check();
+    return { ...ctx, hp, siteKm: ctx.f.up.clone().multiplyScalar((R_MOON + ctx.site.h + h) / 1000) };
+  }
+
+  /**
+   * Power and Comms feasibility inputs at time ms: the Sun as seen from the panel, the Earth
+   * from the antenna (heights from the config), each counted visible while its margin is
+   * above -horizonToleranceDeg (the Earth's also minus the query's link mask).
+   */
+  async function mastInputs(ctx: SiteCtx, lat: number, lon: number, ms: number, mask: number, days: number,
+    cfg: FeasibilityConfig, check: () => void) {
+    const tol = cfg.horizonToleranceDeg;
+    const ctxP = await atHeight(ctx, lat, lon, cfg.panelHeightM, check);
+    const ctxA = cfg.antennaHeightM === cfg.panelHeightM ? ctxP : await atHeight(ctx, lat, lon, cfg.antennaHeightM, check);
+    const gP = geoFns(ctxP), gA = geoFns(ctxA);
+    const windowH = days * 24;
+    const sunMargin = async (t: number) => (await gP.sunGeo(t)).marginDeg + tol;
+    const earthMargin = async (t: number) => (await gA.earthGeo(t)).marginDeg - mask + tol;
+    const sun = await gP.sunGeo(ms), earth = await gA.earthGeo(ms);
+    const sm = sun.marginDeg + tol, em = earth.marginDeg - mask + tol;
+    check();
+    const sunSet = sm > 0 ? await findCrossing(sunMargin, ms, days, 1) : null;
+    check();
+    const earthSet = em > 0 ? await findCrossing(earthMargin, ms, days, 1) : null;
+    check();
+    const refP = await refYear(lat, lon, cfg.panelHeightM, tol, mask - tol, gP.geo);
+    const refA = ctxA === ctxP ? refP : await refYear(lat, lon, cfg.antennaHeightM, tol, mask - tol, gA.geo);
+    return {
+      sunVisibleNow: discFractionAbove(sm, sun.angularRadiusDeg),
+      sunHoursRemaining: sm > 0 ? (sunSet === null ? windowH : (sunSet - ms) / 3600e3) : 0,
+      annualIllumination: refP.n ? refP.sun / refP.n : 0,
+      earthVisibleNow: discFractionAbove(em, earth.angularRadiusDeg),
+      linkMarginDeg: Math.max(0, em),
+      earthHoursRemaining: em > 0 ? (earthSet === null ? windowH : (earthSet - ms) / 3600e3) : 0,
+      annualEarthVisibility: refA.n ? refA.earth / refA.n : 0,
+    };
   }
 
   // ---- the query ------------------------------------------------------------------------
@@ -524,7 +569,6 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     }
     const mins = (t: number | null) => (t === null ? null : Math.round((t - ms) / 6e3) / 10);
     const earthRise = nextRise ?? followRise, earthSet = nextSet ?? followSet;
-    const earthSetT = nextSet;
 
     // power
     const sunMargin = async (t: number) => (await sunGeo(t)).marginDeg;
@@ -562,8 +606,6 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       centreFraction: total ? centre / total : 0,
     };
 
-    const { sun: refSun, earth: refEarth, n: refN } = await refYear(lat, lon, hObs, mask, geo);
-
     // absorbed-flux history on the local ground facet (30 min steps, ~3 lunations back)
     const HIST_STEP = 1800;
     const t0h = clampT(ms - HIST_DAYS * 86400e3);
@@ -589,20 +631,15 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       anyPartFractionYear: illum.anyPartFraction,
     });
 
-    const windowH = days * 24;
+    // the score sees the Sun / Earth from the panel / antenna mast, with the horizon tolerance
+    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
     const feasInputs: FeasibilityInputs = {
-      sunVisibleNow: vf,
-      sunHoursRemaining: sunUp ? (sunSet === null ? windowH : (sunSet - ms) / 3600e3) : 0,
-      annualIllumination: refN ? refSun / refN : 0,
-      earthVisibleNow: earthFrac,
-      linkMarginDeg: Math.max(0, earth.marginDeg - mask),
-      earthHoursRemaining: visibleNow ? (earthSetT === null ? windowH : (earthSetT - ms) / 3600e3) : 0,
-      annualEarthVisibility: refN ? refEarth / refN : 0,
+      ...(await mastInputs(ctx, lat, lon, ms, mask, days, cfg, check)),
       slopeDeg,
       temperatureK: temperature.surfaceK,
       prominenceM: prominence,
     };
-    const feas = feasibility(feasInputs, opts.feasibilityConfig ?? DEFAULT_FEASIBILITY);
+    const feas = feasibility(feasInputs, cfg);
 
     const r2 = (x: number) => Math.round(x * 100) / 100;
     const r3 = (x: number) => Math.round(x * 1000) / 1000;
@@ -698,9 +735,16 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     const SEARCH_DAYS = 30; // query()'s default rise/set window (the "remaining" inputs are capped by it)
     const LOOKAHEAD_DAYS = 15;
 
+    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
+    const tol = cfg.horizonToleranceDeg;
     const ctx = await prepare(lat, lon, hObs, check);
     const { geo } = geoFns(ctx);
-    const ref = await refYear(lat, lon, hObs, mask, geo);
+    // the score sees the Sun / Earth from the panel / antenna mast, with the horizon tolerance
+    const ctxP = await atHeight(ctx, lat, lon, cfg.panelHeightM, check);
+    const ctxA = cfg.antennaHeightM === cfg.panelHeightM ? ctxP : await atHeight(ctx, lat, lon, cfg.antennaHeightM, check);
+    const geoP = geoFns(ctxP).geo, geoA = ctxA === ctxP ? geoP : geoFns(ctxA).geo;
+    const refP = await refYear(lat, lon, cfg.panelHeightM, tol, mask - tol, geoP);
+    const refA = ctxA === ctxP ? refP : await refYear(lat, lon, cfg.antennaHeightM, tol, mask - tol, geoA);
     check();
 
     // grid step: a multiple of the thermal model's 120 s time step
@@ -715,12 +759,14 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     const tAt = (k: number) => t0 + (k - nWarm) * step;
     for (let k = 0; k < n; k++) {
       if ((k & 255) === 0) check();
-      const g = await geo(clampT(tAt(k)));
-      sunM[k] = g.sun.marginDeg;
-      sunF[k] = g.sun.visibleFraction;
-      earthM[k] = g.earth.marginDeg - mask;
-      earthF[k] = discFractionAbove(earthM[k], g.earth.angularRadiusDeg);
-      if (k < absorbed.length) absorbed[k] = absorbedFlux(g, ctx.normal);
+      const t = clampT(tAt(k));
+      const gp = await geoP(t), ga = geoA === geoP ? gp : await geoA(t);
+      sunM[k] = gp.sun.marginDeg + tol;
+      sunF[k] = discFractionAbove(sunM[k], gp.sun.angularRadiusDeg);
+      earthM[k] = ga.earth.marginDeg - mask + tol;
+      earthF[k] = discFractionAbove(earthM[k], ga.earth.angularRadiusDeg);
+      // the ground's own sunlight (temperature) is seen from the query height, without tolerance
+      if (k < absorbed.length) absorbed[k] = absorbedFlux(await geo(t), ctx.normal);
     }
     check();
     const temps = simulateRegolithSeries(absorbed, stepS, nWarm);
@@ -745,7 +791,6 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     };
     const sunRem = remaining(sunM), earthRem = remaining(earthM);
 
-    const cfg = opts.feasibilityConfig ?? DEFAULT_FEASIBILITY;
     const out: SiteSeries = {
       query: { lat, lon, startUtc: iso(t0)!, spanMs: span, observerHeightM: hObs },
       stepMs: step,
@@ -759,11 +804,11 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
       const r = feasibility({
         sunVisibleNow: sunF[k],
         sunHoursRemaining: sunRem[i],
-        annualIllumination: ref.n ? ref.sun / ref.n : 0,
+        annualIllumination: refP.n ? refP.sun / refP.n : 0,
         earthVisibleNow: earthF[k],
         linkMarginDeg: Math.max(0, earthM[k]),
         earthHoursRemaining: earthRem[i],
-        annualEarthVisibility: ref.n ? ref.earth / ref.n : 0,
+        annualEarthVisibility: refA.n ? refA.earth / refA.n : 0,
         slopeDeg: ctx.slopeDeg,
         temperatureK: tK,
         prominenceM: ctx.prominence,
