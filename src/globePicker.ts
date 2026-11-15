@@ -4,7 +4,7 @@ import {
   SphereGeometry, SRGBColorSpace, TextureLoader, Vector3, WebGLRenderer,
 } from 'three';
 
-import { VrHudButton } from './overlay/vrHudButton';
+import { VrHudButton, VrHudPointers } from './overlay/vrHudButton';
 import { VrHeatmap, type VrFeasibility } from './overlay/vrFeasibility';
 
 export interface GlobeHeadset {
@@ -100,7 +100,8 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
     const bounds = new Sphere(new Vector3(), radius);
     const local = new Vector3();
     const ray = new Ray(), hit = new Vector3(), forward = new Vector3();
-    let anchored = false, lastTime = 0, previousSource: XRInputSource | undefined, xHeld = false;
+    const pointers = new VrHudPointers();
+    let anchored = false, lastTime = 0;
     return await new Promise<boolean>((resolve, reject) => {
       let finished = false;
       const ended = () => { finished = true; if (!selected) resolve(false); };
@@ -111,7 +112,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
         const pose = frame.getViewerPose(space);
         if (!pose || session.visibilityState !== 'visible') {
           scoreButton?.hide();
-          previousSource = undefined;
+          pointers.reset();
           dot.visible = beam.visible = false;
           return;
         }
@@ -135,18 +136,16 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
           }
           heatmap?.update(time);
           let title = 'Point with your left controller';
-          const left = Array.from(session.inputSources).find(input =>
-            input.handedness === 'left' && input.gamepad?.mapping === 'xr-standard');
-          const pad = left?.gamepad;
-          const pressed = !!pad?.buttons[4]?.pressed;
-          const click = !!left && left === previousSource && pressed && !xHeld;
-          previousSource = left;
-          xHeld = pressed;
+          pointers.update(session, frame, space);
+          const left = pointers.left;
+          const pad = left.source?.gamepad;
           const x = pad?.axes[2] ?? 0, y = pad?.axes[3] ?? 0;
           if (Math.abs(x) > .15) moon.rotation.y += x * dt * 1.6;
           if (Math.abs(y) > .15) moon.rotation.x = MathUtils.clamp(moon.rotation.x + y * dt * 1.6, -Math.PI / 2, Math.PI / 2);
-          const aim = left && frame.getPose(left.targetRaySpace, space);
-          const overButton = scoreButton?.update(pose, left, aim);
+          const aim = left.aim;
+          const uiClick = scoreButton?.update(pose, pointers);
+          const click = left.faceClick && !uiClick;
+          const overButton = left.overButton;
           beam.visible = !!aim && !overButton;
           dot.visible = false;
           if (aim && !overButton) {

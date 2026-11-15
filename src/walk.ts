@@ -11,7 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
-import { VrHudButton } from './overlay/vrHudButton';
+import { VrHudButton, VrHudPointers } from './overlay/vrHudButton';
 import type { VrFeasibility } from './overlay/vrFeasibility';
 import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
@@ -274,6 +274,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   canvas.setAttribute('aria-label', 'Lunar surface, first-person view');
   const scores = options.vrScores;
   const scoreButton = scores && VrHudButton.feasibility(scores, -.235);
+  const pointers = new VrHudPointers();
   const globeButton = new VrHudButton('Return to globe', requestGlobe, scores ? .235 : 0);
   rig.add(globeButton.mesh);
   if (scoreButton) rig.add(scoreButton.mesh);
@@ -334,7 +335,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let supportCheck = 0;
   let shadowX = Infinity, shadowZ = Infinity;
 
-  let jumpHeld = false;
   const gripPoints = [new Vector3(),new Vector3()];
   const grips: (Vector3 | undefined)[] = [undefined,undefined];
   const gripRotations = [new Quaternion(), new Quaternion()];
@@ -466,7 +466,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     globeButton.hide();
     keys.clear();
     gait.reset();
-    jumpHeld = false;
+    pointers.reset();
     wrist.hide();
     turning.reset();
     suit.resetFeet();
@@ -750,7 +750,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     stick.set(0, 0);
     let turn = 0, trackedHeight = eyeHeight;
     let running = keys.has('ShiftLeft') || keys.has('ShiftRight');
-    let jumpDown = false, sprint = 0, grab = false, mark = false, gotRay = false;
+    let sprint = 0, grab = false, mark = false, gotRay = false;
     pads.fill(undefined);
     grips.fill(undefined);
     if (frame && activeSession) {
@@ -758,16 +758,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       const pose = space && frame.getViewerPose(space);
       if (!pose || activeSession.visibilityState !== 'visible') {
         returnArmed = undefined;
+        pointers.reset();
         scoreButton?.hide();
         globeButton.hide();
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
-      const left = Array.from(activeSession.inputSources).find(source =>
-        source.handedness === 'left' && source.gamepad?.mapping === 'xr-standard');
-      const aim = left && frame.getPose(left.targetRaySpace, space!);
-      scoreButton?.update(pose, left, aim);
-      globeButton.update(pose, left, aim);
+      pointers.update(activeSession, frame, space!);
+      scoreButton?.update(pose, pointers);
+      globeButton.update(pose, pointers);
       if (choosingLanding) return;
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
@@ -789,12 +788,9 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         if (input.handedness !== 'none') pads[input.handedness === 'right' ? 1 : 0] = pad ?? undefined;
         if (pad?.mapping === 'xr-standard') {
           if (input.handedness === 'right') {
-            jumpDown = !!pad.buttons[4]?.pressed;
             mark = !!pad.buttons[5]?.pressed;
             grab = !!pad.buttons[1]?.pressed;
-            const trigger = pad.buttons[0];
-            const pressure = trigger?.value ?? (trigger?.pressed ? 1 : 0);
-            sprint = Math.max(0, (pressure - .12) / .88);
+            if (!pointers.right.triggerCaptured) sprint = Math.max(0, (pointers.right.triggerPressure - .12) / .88);
           }
           if (input.handedness === 'left') {
             running = !!pad.buttons[1]?.pressed;
@@ -826,8 +822,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         else stick.set(deadzone(axes[offset]), -deadzone(axes[offset + 1]));
       }
       if (sprint > 0 && stick.lengthSq() === 0) stick.y = 1;
-      if (jumpDown && !jumpHeld) gait.requestJump();
-      jumpHeld = jumpDown;
+      if (pointers.right.faceClick && !pointers.right.overButton) gait.requestJump();
       const radians = turning.advance(deadzone(turn), dt);
       if (radians) {
         // Rotate about the wearer's current position, including physical travel from the origin.
