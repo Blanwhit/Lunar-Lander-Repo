@@ -1,16 +1,72 @@
 import {
-  BufferGeometry, Float32BufferAttribute, Group, Mesh, ShaderMaterial, Vector3,
+  DataArrayTexture, LinearFilter, Material, RGFormat, type DataTexture,
 } from 'three';
-import { dirToFace, FACES, type Vec3 } from '../geom';
-import type { FeasibilityOverlay, FeasLookup } from './FeasibilityOverlay';
+import { dirToFace, type Vec3 } from '../geom';
+import type { FeasibilityOverlay } from './FeasibilityOverlay';
 
 // A handheld globe uses the first subdivided level (128 samples across each face).
 // The same ancestor tile and bilinear sampling are used for the tint and the readout.
 export class VrFeasibility {
   readonly level: number;
 
+  private readonly atlas: DataArrayTexture;
+  private readonly layers: { level:number; face:number; x:number; y:number; source?:DataTexture; version:number }[] = [];
+  private readonly visible = {value:false};
+  private nextRefresh = 0;
+
   constructor(readonly overlay: FeasibilityOverlay, readonly toggle: () => void) {
     this.level = Math.min(1, overlay.meta.maxLevel);
+    for (let level=0; level<=this.level; level++) {
+      const count=1<<level;
+      for(let face=0;face<6;face++) for(let y=0;y<count;y++) for(let x=0;x<count;x++){
+        this.layers.push({level,face,x,y,version:-1});
+      }
+    }
+    const size=overlay.meta.samples;
+    this.atlas=new DataArrayTexture(new Uint8Array(size*size*2*this.layers.length),size,size,this.layers.length);
+    this.atlas.format=RGFormat;
+    this.atlas.magFilter=this.atlas.minFilter=LinearFilter;
+    this.atlas.needsUpdate=true;
+  }
+
+  /** One score sampler for the picking globe, the orbital Moon and the rendered soil. */
+  applyTo(material: Material, bodyDirection: string) {
+    const compile=material.onBeforeCompile;
+    material.onBeforeCompile=(shader,renderer)=>{
+      compile.call(material,shader,renderer);
+      shader.uniforms.vrScoreAtlas={value:this.atlas};
+      shader.uniforms.vrHeatEnabled=this.visible;
+      shader.vertexShader='varying vec3 vScoreDirection;\n'+shader.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n vScoreDirection='+bodyDirection+';');
+      shader.fragmentShader=heatmapShader(this.overlay.meta.samples,this.level)+shader.fragmentShader.replace(
+        '#include <colorspace_fragment>',
+        'if(vrHeatEnabled) gl_FragColor.rgb=feasibilityTint(gl_FragColor.rgb,vScoreDirection);\n#include <colorspace_fragment>');
+    };
+  }
+
+  update(time:number) {
+    this.visible.value=this.overlay.enabled;
+    if(!this.visible.value){this.nextRefresh=0;return;}
+    if(time<this.nextRefresh)return;
+    this.nextRefresh=time+100;
+    const size=this.overlay.meta.samples, area=size*size;
+    const pixels=this.atlas.image.data as Uint8Array;
+    let changed=false;
+    for(const [index,layer] of this.layers.entries()){
+      const tile=this.overlay.lookup(layer.level,layer.face,layer.x,layer.y,true);
+      // Store each tile at its native resolution. The shader falls back to the root when needed.
+      const source=tile?.scale===1?tile.tex:undefined;
+      if(layer.source===source && layer.version===(source?.version??-1))continue;
+      layer.source=source;layer.version=source?.version??-1;
+      const offset=index*area*2;
+      if(source){
+        const scores=source.image.data as Uint8Array;
+        for(let i=0;i<area;i++){pixels[offset+2*i]=scores[i];pixels[offset+2*i+1]=255;}
+      }else pixels.fill(0,offset,offset+area*2);
+      changed=true;
+    }
+    this.overlay.endFrame();
+    if(changed)this.atlas.needsUpdate=true;
   }
 
   reading(direction: Vec3, label = 'Feasibility') {
@@ -34,73 +90,34 @@ export class VrFeasibility {
   }
 }
 
-function patch(face: number, x: number, y: number, count: number, radius: number) {
-  const positions: number[] = [], uvs: number[] = [], indices: number[] = [];
-  const basis = FACES[face], steps = 16;
-  const direction = new Vector3(), axisU = new Vector3(...basis.u), axisV = new Vector3(...basis.v);
-  for (let j = 0; j <= steps; j++) for (let i = 0; i <= steps; i++) {
-    const u = i/steps, v = j/steps;
-    const a = Math.tan(((x+u)/count - .5) * Math.PI/2);
-    const b = Math.tan(((y+v)/count - .5) * Math.PI/2);
-    direction.set(...basis.n).addScaledVector(axisU,a).addScaledVector(axisV,b).setLength(radius);
-    positions.push(direction.x, direction.z, -direction.y);
-    uvs.push(u, v);
-    if (i < steps && j < steps) {
-      const k = j*(steps+1)+i;
-      indices.push(k,k+1,k+steps+2, k,k+steps+2,k+steps+1);
+// Match geom.dirToFace and the worker's texel-centred, equi-angular score grid.
+function heatmapShader(samples:number,level:number){
+  return `
+    varying vec3 vScoreDirection;
+    uniform highp sampler2DArray vrScoreAtlas;
+    uniform bool vrHeatEnabled;
+    vec2 scoreLayer(vec2 uv, float layer){
+      return texture(vrScoreAtlas,vec3((uv*${(samples-1).toFixed(1)}+.5)/${samples.toFixed(1)},layer)).rg;
     }
-  }
-  const geometry = new BufferGeometry();
-  geometry.setAttribute('position',new Float32BufferAttribute(positions,3));
-  geometry.setAttribute('uv',new Float32BufferAttribute(uvs,2));
-  geometry.setIndex(indices);
-  return geometry;
-}
-
-/** Borrow score textures owned by the desktop overlay, also shared by the wrist display. */
-export class VrHeatmap {
-  readonly group = new Group();
-  private tiles: { face:number; x:number; y:number; mesh:Mesh<BufferGeometry,ShaderMaterial> }[] = [];
-  private nextRefresh = 0;
-  constructor(private scores: VrFeasibility, radius: number) {
-    const n = 1 << scores.level;
-    for (let face=0; face<6; face++) for (let y=0; y<n; y++) for (let x=0; x<n; x++) {
-      const material = new ShaderMaterial({
-        transparent:true, depthWrite:false, toneMapped:false,
-        uniforms:{ scores:{value:null}, transform:{value:new Vector3()}, samples:{value:scores.overlay.meta.samples} },
-        vertexShader:`varying vec2 coord;
-          void main(){coord=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
-        fragmentShader:`uniform sampler2D scores; uniform vec3 transform; uniform float samples; varying vec2 coord;
-          void main(){
-            vec2 uv=((transform.yz + coord*transform.x)*(samples-1.0)+0.5)/samples;
-            float s=texture2D(scores,uv).r;
-            vec3 red=vec3(.86,.12,.09), yellow=vec3(.98,.84,.16), green=vec3(.13,.70,.27);
-            vec3 color=s<.5 ? mix(red,yellow,2.0*s) : mix(yellow,green,2.0*s-1.0);
-            gl_FragColor=vec4(pow(color,vec3(2.2)),.72);
-            #include <colorspace_fragment>
-          }`,
-      });
-      const mesh = new Mesh(patch(face,x,y,n,radius*1.003),material);
-      mesh.visible=false;
-      this.group.add(mesh);
-      this.tiles.push({face,x,y,mesh});
+    vec3 feasibilityTint(vec3 base,vec3 d){
+      vec3 a=abs(d);
+      vec2 uv;float face;
+      if(a.x>=a.y && a.x>=a.z){
+        face=d.x>=0.?0.:1.;uv=vec2(d.x>=0.?d.y:-d.y,d.z)/a.x;
+      }else if(a.y>=a.z){
+        face=d.y>=0.?2.:3.;uv=vec2(d.y>=0.?-d.x:d.x,d.z)/a.y;
+      }else{
+        face=d.z>=0.?4.:5.;uv=vec2(d.y,d.z>=0.?-d.x:d.x)/a.z;
+      }
+      uv=clamp(.5+atan(uv)*.6366197724,0.,1.);
+      vec2 sc;
+      ${level>0?`vec2 cell=min(floor(uv*2.),vec2(1.));
+        sc=scoreLayer(uv*2.-cell,6.+4.*face+2.*cell.y+cell.x);
+        if(sc.g<.5)sc=scoreLayer(uv,face);`:'sc=scoreLayer(uv,face);'}
+      if(sc.g<.5)return base;
+      vec3 red=vec3(.86,.12,.09),yellow=vec3(.98,.84,.16),green=vec3(.13,.70,.27);
+      vec3 ramp=sc.r<.5?mix(red,yellow,2.*sc.r):mix(yellow,green,2.*sc.r-1.);
+      return mix(base,pow(ramp,vec3(2.2)),.72);
     }
-  }
-  update(time: number) {
-    this.group.visible=this.scores.overlay.enabled;
-    if (!this.group.visible) { this.nextRefresh=0; return; }
-    if (time < this.nextRefresh) return;
-    this.nextRefresh=time+100;
-    for (const {face,x,y,mesh} of this.tiles) {
-      const tile: FeasLookup | null = this.scores.overlay.lookup(this.scores.level,face,x,y,true);
-      mesh.visible=!!tile;
-      if (!tile) continue;
-      mesh.material.uniforms.scores.value=tile.tex;
-      mesh.material.uniforms.transform.value.set(tile.scale,tile.ou,tile.ov);
-    }
-    this.scores.overlay.endFrame();
-  }
-  dispose() {
-    for (const {mesh} of this.tiles) { mesh.geometry.dispose(); mesh.material.dispose(); }
-  }
+  `;
 }

@@ -5,7 +5,7 @@ import {
 } from 'three';
 
 import { VrHudButton, VrHudPointers } from './overlay/vrHudButton';
-import { VrHeatmap, type VrFeasibility } from './overlay/vrFeasibility';
+import type { VrFeasibility } from './overlay/vrFeasibility';
 
 export interface GlobeHeadset {
   renderer: WebGLRenderer;
@@ -50,7 +50,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
   const moon = new Mesh(new SphereGeometry(radius, 96, 64), new MeshBasicMaterial({ map }));
   moon.rotation.set(MathUtils.degToRad(latitude), -Math.PI / 2 - MathUtils.degToRad(longitude), 0);
   stand.add(moon);
-  let heatmap: VrHeatmap | undefined;
+  scores?.applyTo(moon.material,'vec3(position.x,-position.z,position.y)');
   const dot = new Mesh(new SphereGeometry(.008, 12, 8), new MeshBasicMaterial({ color: 0x6be8ff }));
   const beam = new Line(new BufferGeometry().setFromPoints([new Vector3(), new Vector3()]),
     new LineBasicMaterial({ color: 0x7ecbda }));
@@ -90,7 +90,6 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
   let selected = false, landingFailed = false;
   function release() {
     scoreButton?.dispose();
-    heatmap?.dispose();
     moon.geometry.dispose(); moon.material.dispose(); map.dispose();
     dot.geometry.dispose(); dot.material.dispose();
     beam.geometry.dispose(); beam.material.dispose();
@@ -130,11 +129,6 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
         const dt = MathUtils.clamp((time - lastTime) / 1000, 0, .05);
         lastTime = time;
         if (!selected) {
-          if (scores?.overlay.enabled && !heatmap) {
-            heatmap = new VrHeatmap(scores,radius);
-            moon.add(heatmap.group);
-          }
-          heatmap?.update(time);
           let title = 'Point with your left controller';
           pointers.update(session, frame, space);
           const left = pointers.left;
@@ -204,6 +198,7 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
           if (!selected) caption(title, landingFailed ? 'Terrain could not load · Press X to try again' : controls, scores?.overlay.enabled
             ? 'Red 0% · Yellow 50% · Green 100%' : '');
         }
+        scores?.update(time);
         renderer.render(scene, camera);
       });
     });
