@@ -224,6 +224,7 @@ export class TileTree {
   private wantColour: TileNode[] = [];
   private arrivals: HeightResult[] = [];
   private colourArrivals: [TileNode, Texture][] = [];
+  grainMaps?: { color: Texture; normal: Texture };
   private fallbackColour = makeFallbackColour();
   private frustum = new Frustum();
   private tmpM = new Matrix4();
@@ -608,6 +609,10 @@ export class TileTree {
           uExposure: { value: 1 },
           uEarthDir: { value: new Vector3(1, 0, 0) },
           uEarthshine: { value: 0 },
+          uDustMap: { value: this.fallbackColour },
+          uDustNormal: { value: this.fallbackColour },
+          uDustOrigin: { value: new Vector3() },
+          uDustReady: { value: 0 },
           uFeas: { value: this.fallbackColour },
           uFeasXf: { value: new Vector3(1, 0, 0) },
           uFeasOn: { value: 0 },
@@ -642,6 +647,12 @@ export class TileTree {
     u.uExposure.value = lightParams.exposure;
     (u.uEarthDir.value as Vector3).copy(lightParams.earthDir);
     u.uEarthshine.value = lightParams.earthshine;
+    u.uDustReady.value = this.grainMaps ? 1 : 0;
+    if (this.grainMaps) {
+      u.uDustMap.value = this.grainMaps.color;
+      u.uDustNormal.value = this.grainMaps.normal;
+      u.uDustOrigin.value.set(fi.camPos[0] % 4096, fi.camPos[1] % 4096, fi.camPos[2] % 4096);
+    }
     const fz = this.feasProvider ? this.feasProvider(n.level, n.face, n.x, n.y) : null;
     u.uFeasOn.value = fz ? 1 : 0;
     if (fz) {

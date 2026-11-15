@@ -16,19 +16,30 @@ export interface SoilMaps {
 }
 let maps: Promise<SoilMaps> | undefined;
 
+let grainMaps: Promise<Pick<SoilMaps, 'color' | 'normal'>> | undefined;
+const loader = new TextureLoader().setPath(import.meta.env.BASE_URL + 'lunar-soil/');
+
+export function loadGrainMaps() {
+  return grainMaps ??= Promise.all(['basecolor.jpg', 'normal.jpg'].map(file => loader.loadAsync(file)))
+    .then(([color, normal]) => {
+      color.colorSpace = SRGBColorSpace;
+      for (const t of [color, normal]) {
+        t.wrapS = t.wrapT = RepeatWrapping;
+        t.anisotropy = 4;
+      }
+      return { color, normal };
+    }).catch(error => { grainMaps = undefined; throw error; });
+}
+
 async function fetchMaps(): Promise<SoilMaps> {
-  const loader = new TextureLoader().setPath(import.meta.env.BASE_URL + 'lunar-soil/');
-  const [color, normal, globe, heights] = await Promise.all(
-    ['basecolor.jpg', 'normal.jpg', 'global-albedo.jpg', 'height.png'].map(file => loader.loadAsync(file)),
-  );
-  color.colorSpace = globe.colorSpace = SRGBColorSpace;
-  for (const t of [color, normal, globe]) {
-    t.wrapS = RepeatWrapping;
-    t.magFilter = LinearFilter;
-    t.minFilter = LinearMipmapLinearFilter;
-    t.anisotropy = 4;
-  }
-  color.wrapT = normal.wrapT = RepeatWrapping;
+  const [{ color, normal }, globe, heights] = await Promise.all([
+    loadGrainMaps(), loader.loadAsync('global-albedo.jpg'), loader.loadAsync('height.png'),
+  ]);
+  globe.colorSpace = SRGBColorSpace;
+  globe.wrapS = RepeatWrapping;
+  globe.magFilter = LinearFilter;
+  globe.minFilter = LinearMipmapLinearFilter;
+  globe.anisotropy = 4;
   // One filtered height sample per 1.56 cm is ample for the finest walking mesh.
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = elevationPixels;
