@@ -26,6 +26,8 @@ export function landingFlight(orbit: GlobeControls, destinationFrame: Matrix4) {
   const initialTilt = orbit.tilt();
   const rotation = new Quaternion();
   return {
+    /** flight progress at which the surface starts to fade in (the walk must be ready by then) */
+    dissolveStart: hasClimb ? .60 : .48,
     duration: 1300 + 170 * (startLog - endLog) + (hasClimb ? 900 : 0),
     sample(t: number): LandingFrame {
       const progress = MathUtils.smootherstep(t, 0, 1);

@@ -14,13 +14,6 @@ function cross(a: Point, b: Point, x: number, z: number) {
   return (b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x);
 }
 
-function touchesEdge(a: Point, b: Point, x: number, z: number, radiusSq: number) {
-  const dx = b.x - a.x, dz = b.z - a.z;
-  const lengthSq = dx * dx + dz * dz;
-  const t = lengthSq ? Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / lengthSq)) : 0;
-  return (x - a.x - t * dx) ** 2 + (z - a.z - t * dz) ** 2 <= radiusSq;
-}
-
 /** Horizontal footprint of the visible scan, clipped to the soil in its placed orientation. */
 export class RockCollision {
   private readonly bins: Face[][] = Array.from({ length: binsPerAxis ** 2 }, () => []);
@@ -87,21 +80,5 @@ export class RockCollision {
       if (u >= -1e-9 && v >= -1e-9 && w >= -1e-9) top = Math.max(top, u*a.y + v*b.y + w*c.y);
     }
     return top;
-  }
-
-  touches(x: number, z: number, radius: number): boolean {
-    if (x + radius < this.minX || x - radius > this.maxX ||
-        z + radius < this.minZ || z - radius > this.maxZ) return false;
-    const left = this.bin(x - radius, this.minX, this.maxX), right = this.bin(x + radius, this.minX, this.maxX);
-    const top = this.bin(z - radius, this.minZ, this.maxZ), bottom = this.bin(z + radius, this.minZ, this.maxZ);
-    const r2 = radius * radius;
-    for (let j = top; j <= bottom; j++) for (let i = left; i <= right; i++) {
-      for (const { a, b, c } of this.bins[j * binsPerAxis + i]) {
-        const ab = cross(a, b, x, z), bc = cross(b, c, x, z), ca = cross(c, a, x, z);
-        if ((ab > 0 && bc > 0 && ca > 0) || (ab < 0 && bc < 0 && ca < 0) ||
-            touchesEdge(a, b, x, z, r2) || touchesEdge(b, c, x, z, r2) || touchesEdge(c, a, x, z, r2)) return true;
-      }
-    }
-    return false;
   }
 }

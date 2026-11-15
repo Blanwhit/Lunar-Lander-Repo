@@ -245,6 +245,19 @@ export class SurfaceSunGlare {
     this.mesh.visible = this.vis > 0.002 && this.look.dot(sun) > COS_100;
   }
 
+  /** start from the true visibility at `eye` (no fade-in from zero on arrival) */
+  prime(eye: Vector3, sun: Vector3, sunR: number, heightAt: (x: number, z: number) => number) {
+    this.vis = this.target = surfaceSunVisibleFraction(eye, sun, sunR, heightAt);
+    this.checkedAt.copy(eye);
+    this.checkedSun.copy(sun);
+    this.sinceCheck = 0;
+  }
+
+  /** eased visible fraction of the solar disc from the eye (0 = Sun behind terrain) */
+  get visibility() {
+    return this.vis;
+  }
+
   dispose() {
     this.mesh.geometry.dispose();
     this.mat.dispose();

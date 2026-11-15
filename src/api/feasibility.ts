@@ -102,12 +102,6 @@ export const DEFAULT_FEASIBILITY: FeasibilityConfig = {
   },
 };
 
-export const CATEGORY_OF: Record<FactorKey, Category> = {
-  sunVisibleNow: 'power', sunHoursRemaining: 'power', annualIllumination: 'power',
-  earthVisibleNow: 'comms', linkMarginDeg: 'comms', earthHoursRemaining: 'comms', annualEarthVisibility: 'comms',
-  slopeDeg: 'landing', temperatureK: 'landing', prominenceM: 'landing',
-};
-
 /** piecewise-linear utility, clamped to the end values */
 export function utility(curve: Curve, x: number): number {
   if (!(x === x)) return 0; // NaN

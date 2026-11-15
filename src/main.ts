@@ -100,6 +100,12 @@ async function main() {
   let simMs = clampT(Math.floor(Date.now() / 60000) * 60000);
   const sunKm = new Vector3(), earthKm = new Vector3(); // body frame, Moon-centred
   let bodiesReady = false;
+  let bodiesMs = NaN; // time the Sun/Earth vectors below were computed for
+  let bodiesWaiters: (() => void)[] = [];
+  /** resolves once the Sun/Earth positions for the current simulated time are in */
+  const bodiesNow = () => bodiesReady && bodiesMs === simMs
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => bodiesWaiters.push(resolve));
   let timeToken = 0;
   const bodyToJ2000 = new Matrix3();
 
@@ -187,8 +193,25 @@ async function main() {
     controls.flyTo(dir);
     popup.show(site.lat, site.lon);
     void scoreSite();
+    prefetchWalk(site.lat, site.lon);
     needsRender = true;
   });
+
+  // "Enter VR" is the popup's main action: warm the walk while the popup is read, so the
+  // landing only has to build the scene. Deferred a little so the fly-to stays smooth, and
+  // skipped if the popup was closed or moved on in the meantime.
+  let prefetched: { lat: number; lon: number; terrain: Promise<import('./walkTerrain').WalkTerrain> } | null = null;
+  let prefetchTimer = 0;
+  function prefetchWalk(lat: number, lon: number) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = window.setTimeout(() => {
+      if (!site || site.lat !== lat || site.lon !== lon) return;
+      void import('./walk').then((walk) => walk.prefetchWalk()).catch(() => {});
+      const terrain = import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+      terrain.catch(() => { if (prefetched?.terrain === terrain) prefetched = null; });
+      prefetched = { lat, lon, terrain };
+    }, 300);
+  }
 
   /** body-frame surface point under a CSS-pixel position (ray-marched against loaded terrain) */
   function pickSurface(px: number, py: number): Vector3 | null {
@@ -262,6 +285,11 @@ async function main() {
     (skyMat.uniforms.uEarthSun.value as Vector3).copy(eToSun);
     skyMat.uniforms.uGmst.value = gmst(ms);
     bodiesReady = true;
+    bodiesMs = ms;
+    if (ms === simMs) {
+      for (const resolve of bodiesWaiters) resolve();
+      bodiesWaiters = [];
+    }
     needsRender = true;
   }
 
@@ -365,11 +393,8 @@ async function main() {
   const proj = new Matrix4();
   let frame = 0;
   let last = performance.now();
-  const perf = { frames: 0, renders: 0, fps: 0, lastFpsT: last, frameMs: 0 };
-  (window as any).__moon = {
-    tree, controls, renderer, perf, LIGHT_PARAMS, LIGHT, sky, skyMat, glare, hud, ephem, setTime, overlay, popup,
-    get simMs() { return simMs; },
-  };
+  // console / bench hooks (web/bench/bench.js, README "Site API"); step and siteApi are added below
+  (window as any).__moon = { tree, controls, renderer };
 
   function render(now: number) {
     requestAnimationFrame(render);
@@ -387,7 +412,6 @@ async function main() {
     const fov = (flightFrame?.fov ?? 45) * DEG;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
     needsRender = false;
-    const t0 = performance.now();
     frame++;
 
     const st = controls.state();
@@ -457,8 +481,6 @@ async function main() {
         popup.place(x >= 0 && x <= cw && y >= 0 && y <= ch ? { x, y } : null);
       } else popup.place(null);
     } else popup.place(null);
-    perf.renders++;
-    perf.frameMs = performance.now() - t0;
   }
   hud.setTime(simMs);
   void setTime(simMs);
@@ -476,15 +498,17 @@ async function main() {
   };
   async function enterVR(lat: number, lon: number) {
     landingBusy = true;
-    // warm the surface assets while the popup closes
-    void import('./walk').then((walk) => walk.preloadSurface()).catch(() => {});
-    const selectedTerrain = import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+    clearTimeout(prefetchTimer);
+    // reuse the popup's prefetch for this spot, otherwise start loading now
+    const selectedTerrain = prefetched && prefetched.lat === lat && prefetched.lon === lon
+      ? prefetched.terrain
+      : import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+    prefetched = null;
     void selectedTerrain.catch(() => {});
+    void import('./walk').then((walk) => walk.prefetchWalk()).catch(() => {});
     popup.close();
     const audio = new HelmetAudio();
     audio.start();
-    // simulated daylight keeps every site walkable (polar / night-side spots included)
-    const daylight = true;
     const origin = { target: controls.tgt.clone(), forward: controls.fwd.clone(), distance: controls.dist,
       tilt: controls.tiltUser, height: controls.pivotHeight };
     const frameAt = (lat: number, lon: number) => {
@@ -496,7 +520,27 @@ async function main() {
     const flight = landingFlight(controls, frameAt(lat, lon));
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     let elapsed = 0;
+    // The descent starts on the click; the walk scene is built while it flies. If it is not
+    // ready by the time the surface should fade in, the flight eases into a hold just before
+    // that point and picks up again (speed eased both ways) once the walk is prepared.
+    let ready = false;
+    let speed = 1;
+    const hold = flight.dissolveStart - 0.005;
     flightFrame = flight.sample(0);
+    advanceFlight = (dt) => {
+      const step = Math.min(dt, 1 / 30);
+      if (reduced) elapsed = ready ? 1 : 0;
+      else {
+        const target = ready ? 1 : Math.min(1, Math.max(0, (hold - elapsed) / 0.06));
+        speed += (target - speed) * -Math.expm1(-step * (ready ? 4 : 12));
+        elapsed = Math.min(ready ? 1 : hold, elapsed + speed * step * 1000 / flight.duration);
+      }
+      flightFrame = flight.sample(elapsed);
+      const height = tree.heightAt([controls.tgt.x, controls.tgt.y, controls.tgt.z]);
+      if (height !== null) controls.pivotHeight += (height - controls.pivotHeight) * -Math.expm1(-dt * 8);
+      walking = ready && flightFrame.opacity >= 1;
+    };
+    showOrbit(false);
     canvas.inert = true;
     const restore = () => {
       audio.dispose();
@@ -521,20 +565,21 @@ async function main() {
       const [{ loadWalkTerrain }, { startWalk }] = await Promise.all([import('./walkTerrain'), import('./walk')]);
       async function siteAt(lat: number, lon: number, terrain = loadWalkTerrain(lat, lon)) {
         const frame = frameAt(lat, lon);
-        const [height] = await Promise.all([terrain, skyPreview]);
+        // true Sun and Earth for the selected UTC time (the HUD's), as seen from this spot
+        const [height] = await Promise.all([terrain, skyPreview, bodiesNow()]);
         const bodyToLocal = frame.clone().transpose();
         const localToStars = new Matrix4().setFromMatrix3(bodyToJ2000).multiply(frame);
         const landingKm = new Vector3().setFromMatrixColumn(frame, 1).multiplyScalar(R_MOON / 1000);
         const toEarth = earthKm.clone().sub(landingKm), toSun = sunKm.clone().sub(landingKm);
-        const sun = daylight ? new Vector3(-.8, .45, -.4) : toSun.clone().transformDirection(bodyToLocal);
-        const earth = bodiesReady ? {
+        const sun = toSun.clone().transformDirection(bodyToLocal);
+        const earth = {
           angularRadius: Math.asin(R_EARTH_KM / toEarth.length()), direction: toEarth.transformDirection(bodyToLocal),
           sunDirection: sunKm.clone().sub(earthKm).transformDirection(bodyToLocal),
           texture: skyMat.uniforms.uEarthTex.value ?? undefined, gmst: gmst(simMs),
-        } : undefined;
+        };
         const seed = Math.imul(Math.round(lat * 10000), 73856093) ^ Math.imul(Math.round(lon * 10000), 19349663);
         return { height, seed, sun, earth, landingToBody: frame,
-          sunAngularRadius: bodiesReady ? Math.asin(R_SUN_KM / toSun.length()) : undefined,
+          sunAngularRadius: Math.asin(R_SUN_KM / toSun.length()),
           skyRotation: new Euler().setFromRotationMatrix(localToStars.transpose()),
           get sky() { return skyMat.uniforms.uStars.value ?? undefined; } };
       }
@@ -542,15 +587,8 @@ async function main() {
       surfaceStars = walkSite.sky;
       await startWalk(document.body, { ...walkSite, siteAt, audio, onExit: restore,
         onPrepared(draw) {
-          showOrbit(false);
           drawApproach = draw;
-          advanceFlight = (dt) => {
-            elapsed = reduced ? 1 : Math.min(1, elapsed + Math.min(dt, 1 / 30) * 1000 / flight.duration);
-            flightFrame = flight.sample(elapsed);
-            const height = tree.heightAt([controls.tgt.x, controls.tgt.y, controls.tgt.z]);
-            if (height !== null) controls.pivotHeight += (height - controls.pivotHeight) * -Math.expm1(-dt * 8);
-            walking = flightFrame.opacity >= 1;
-          };
+          ready = true;
         },
         onArrived() {
           advanceFlight = undefined;
@@ -570,14 +608,6 @@ async function main() {
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
     (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl })));
-
-  // fps counter (only counts rendered frames; readable via window.__moon.perf)
-  setInterval(() => {
-    const now = performance.now();
-    perf.fps = (perf.renders - perf.frames) / ((now - perf.lastFpsT) / 1000);
-    perf.frames = perf.renders;
-    perf.lastFpsT = now;
-  }, 1000);
 }
 
 /** optional deep link: #lat,lon,dist_m[,heading_deg[,tilt_deg[,ISO-8601 UTC time]]] */

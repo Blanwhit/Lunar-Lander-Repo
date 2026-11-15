@@ -133,10 +133,6 @@ export class FeasibilityOverlay {
     this.pump();
   }
 
-  isBusy() {
-    return this.busy.some((b) => b > 0) || this.wantLoad.size > 0 || this.wantCompute.size > 0;
-  }
-
   // ------------------------------------------------------------------- workers
   private pump() {
     if (!this.enabled || !this.workers.length) return;
