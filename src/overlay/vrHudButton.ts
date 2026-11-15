@@ -68,7 +68,7 @@ export class VrHudButton {
   }
 
   constructor(private label: string, private activate: () => void,
-    private offsetX: number, private getEnabled?: () => boolean) {
+    private offsetX: number, private getEnabled?: () => boolean, private row = 0) {
     this.canvas.width = 600;
     this.canvas.height = 120;
     this.texture = new CanvasTexture(this.canvas);
@@ -79,6 +79,15 @@ export class VrHudButton {
     this.mesh.name = label + ' button';
     this.mesh.renderOrder = 10000;
     this.hide();
+  }
+
+  private detail='';
+  setDetail(detail:string) {
+    if(detail!==this.detail){this.detail=detail;this.lastState='';}
+  }
+
+  setCaption(label:string) {
+    if (this.label !== label) {this.label=label;this.lastState='';}
   }
 
   hide() {
@@ -94,7 +103,7 @@ export class VrHudButton {
     const mesh = this.mesh;
     mesh.visible = true;
     mesh.quaternion.copy(viewer.transform.orientation);
-    mesh.position.set(this.offsetX, -.80 * lowerSlope, -1).applyQuaternion(mesh.quaternion).add(viewer.transform.position);
+    mesh.position.set(this.offsetX, -.80 * lowerSlope + this.row * .11, -1).applyQuaternion(mesh.quaternion).add(viewer.transform.position);
     mesh.updateMatrix();
 
     this.inverse.copy(mesh.matrix).invert();
@@ -135,7 +144,8 @@ export class VrHudButton {
       c.textBaseline = 'middle'; c.textAlign = 'center'; c.font = 'bold 36px system-ui';
       c.fillStyle = '#162329'; c.fillText(badge, 62, 61, 50);
       c.fillStyle = '#ffffff'; c.textAlign = 'left'; c.font = '600 46px system-ui';
-      c.fillText(this.label, 118, 61, enabled === undefined ? 450 : 330);
+      c.fillText(this.label, 118, this.detail?43:61, enabled === undefined ? 450 : 330);
+      if(this.detail){c.fillStyle='#cad4d8';c.font='500 30px system-ui';c.fillText(this.detail,118,85,450);}
       if (enabled !== undefined) {
         c.textAlign = 'right'; c.font = 'bold 38px system-ui';
         c.fillStyle = enabled ? '#9ee49d' : '#cad4d8'; c.fillText(enabled ? 'ON' : 'OFF', 556, 61);
