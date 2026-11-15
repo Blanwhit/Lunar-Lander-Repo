@@ -260,6 +260,7 @@ async function main() {
       lat: Math.asin(Math.max(-1, Math.min(1, dir.z))) / DEG,
       lon: Math.atan2(dir.y, dir.x) / DEG,
     };
+    controls.flyTo(dir); // pan the picked spot to the view centre
     stopSeries();
     graphs.clear();
     popup.show(site.lat, site.lon);
