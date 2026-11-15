@@ -24,7 +24,7 @@ import { Matrix3, Vector3 } from 'three';
 import { Ephemeris } from '../ephemeris';
 import { R_MOON, latLonToDir, texelSize, type Vec3 } from '../geom';
 import { moonOrientation, type OrientationProvider } from '../orientation';
-import { TileTerrain } from './terrain';
+import { TileTerrain, type LoadedHeightTile } from './terrain';
 import { albedo, simulateRegolith, simulateRegolithSeries } from './thermal';
 import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig, type FeasibilityInputs, type FeasibilityResult } from './feasibility';
 
@@ -194,6 +194,8 @@ export interface SiteApiOptions {
   /** base URL of the static site (the folder containing tiles/ and ephem/) */
   baseUrl: string;
   terrainUrl?: string;
+  /** Already-decoded grids from the same terrain pyramid, when running in the viewer. */
+  loadedHeightTile?: LoadedHeightTile;
   fetch?: typeof fetch;
   orientation?: OrientationProvider;
   temperatureModel?: TemperatureModel;
@@ -275,7 +277,7 @@ function localFrame(lat: number, lon: number): Frame {
 export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const base = opts.baseUrl.endsWith('/') ? opts.baseUrl : opts.baseUrl + '/';
   const fetchImpl = opts.fetch ?? fetch.bind(globalThis);
-  const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl);
+  const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl, opts.loadedHeightTile);
   const ephem = new Ephemeris(base + 'ephem/', fetchImpl);
   const orientation = opts.orientation ?? moonOrientation;
   const thermal = opts.temperatureModel ?? thermophysicalModel;
@@ -323,7 +325,11 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
     await terrain.until(() => {
       maxDist = 0;
       for (let i = 0; i < n; i++) {
-        const az = i * azStep;
+        const az = i * azStep * DEG;
+        const ca = Math.cos(az), sa = Math.sin(az);
+        const hx = ca * f.north.x + sa * f.east.x;
+        const hy = ca * f.north.y + sa * f.east.y;
+        const hz = ca * f.north.z + sa * f.east.z;
         // elevation atan2(r1 cos th - r0, r1 sin th) with r1 sin th > 0 is monotonic in the
         // tangent (r1 cos th - r0) / (r1 sin th): compare tangents, one atan at the end
         let best = -Infinity;
@@ -335,7 +341,10 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
           if ((rTop * c - r0) / (rTop * s) < best) break;
           const cellMax = Math.max(d * ANG, 1);
           const L = Math.max(0, Math.ceil(Math.log2(texelSize(0) / cellMax)));
-          const smp = terrain.sample(dirAt(f, az, d), L);
+          // A point can raise the current horizon only if its radius exceeds
+          // r0 / (cos(th) - best * sin(th)). Keep a guard for floating-point ties.
+          const minHeight = r0 / (c - best * s) - R_MOON - 0.001;
+          const smp = terrain.sample([f.up.x * c + hx * s, f.up.y * c + hy * s, f.up.z * c + hz * s], L, minHeight);
           if (!isNaN(smp.h)) {
             const r1 = R_MOON + smp.h;
             const e = (r1 * c - r0) / (r1 * s);

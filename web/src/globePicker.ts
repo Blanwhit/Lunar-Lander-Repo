@@ -1,4 +1,4 @@
-import { sendCastFrame } from './castLink';
+import { releaseEyeFrame, sendCastFrame, shareEyeFrame } from './castLink';
 import {
   CanvasTexture, PlaneGeometry, Matrix3, Matrix4, Mesh, MeshBasicMaterial, PerspectiveCamera, Quaternion, Scene,
   SphereGeometry, Vector3, Vector4, WebGLRenderer,
@@ -164,9 +164,11 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
         renderer.autoClear = false;
         try { renderer.render(hud,camera); } finally {renderer.autoClear = autoClear;}
       }
+      shareEyeFrame(time,renderer,pose.views[0]);
     });
     return await result;
   } finally {
+    releaseEyeFrame(renderer);
     globe.active(null);
     session.removeEventListener('end',ended);
     dot.geometry.dispose();dot.material.dispose();

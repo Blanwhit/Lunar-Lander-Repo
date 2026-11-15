@@ -39,7 +39,9 @@ function decodeLegacyGrid(raw:ArrayBuffer,G:number) {
   return q;
 }
 
-export async function decodeHeightTile(compressed: ArrayBuffer): Promise<DecodedHeightTile> {
+// The site sampler can follow the child mask and compare height bounds before
+// it needs a single decoded sample. Release the compressed payload on first use.
+export async function readHeightTile(compressed: ArrayBuffer): Promise<DecodedHeightTile> {
   const modern = new DataView(compressed).getUint32(0) === 0x4d4c4832; // MLH2
   const raw = modern ? compressed : await new Response(
     new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate')),
@@ -49,8 +51,6 @@ export async function decodeHeightTile(compressed: ArrayBuffer): Promise<Decoded
   if (magic !== (modern ? 'MLH2' : 'MLH1')) throw new Error('bad magic');
   const G = dv.getUint16(32, true);
   if (G !== GRID) throw new Error('grid mismatch');
-  const q = modern ? decodeGrid(new Uint8Array(raw, HEADER_BYTES), G, G, new Uint16Array(G * G)) as Uint16Array
-    : decodeLegacyGrid(raw,G);
   return {
     level: dv.getUint8(4),
     face: dv.getUint8(5),
@@ -61,6 +61,18 @@ export async function decodeHeightTile(compressed: ArrayBuffer): Promise<Decoded
     hmax: dv.getFloat32(20, true),
     step: dv.getFloat32(24, true),
     base: dv.getFloat32(28, true),
-    q,
+    get q(): Uint16Array {
+      const grid = modern ? new Uint16Array(G * G) : decodeLegacyGrid(raw, G);
+      if (modern) decodeGrid(new Uint8Array(raw, HEADER_BYTES), G, G, grid);
+      Object.defineProperty(this, 'q', { value: grid, enumerable: true });
+      return grid;
+    },
   };
+}
+
+// Rendering needs the samples immediately to bake normals and transfer the grid.
+export async function decodeHeightTile(compressed: ArrayBuffer): Promise<DecodedHeightTile> {
+  const tile = await readHeightTile(compressed);
+  void tile.q;
+  return tile;
 }
