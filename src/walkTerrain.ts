@@ -1,5 +1,6 @@
 import Lerc from 'lerc';
 import { dirToFace, latLonToDir, R_MOON, type Vec3 } from './geom';
+import { gridRows } from './terrain/gridCodec';
 
 interface GridFile { file: string; width: number; step: number; offset: number }
 interface PatchFile extends GridFile { lat: number; lon: number; spacing: number }
@@ -40,24 +41,18 @@ function nextTask() {
 
 async function readGrid(file: GridFile): Promise<Grid> {
   const response = await fetch(base + file.file);
-  if (!response.ok || !response.body) throw new Error('Could not load lunar terrain: ' + file.file);
-  const stream = response.body.pipeThrough(new DecompressionStream('deflate'));
-  const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
-  const count = file.width ** 2;
-  if (bytes.length !== count * 2) throw new Error('Incomplete lunar terrain: ' + file.file);
-  const data = new Int16Array(count);
+  if (!response.ok) throw new Error('Could not load lunar terrain: ' + file.file);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 4 || String.fromCharCode(...bytes.subarray(0, 4)) !== 'MWG2') {
+    throw new Error('Unsupported lunar terrain format: ' + file.file);
+  }
+  const data = new Int16Array(file.width ** 2);
   let slice = performance.now();
-  for (let row = 0, i = 0; row < file.width; row++) {
+  for (const row of gridRows(bytes.subarray(4), file.width, file.width, data)) {
     // decode in slices of a few ms so a landing flight animating meanwhile keeps its frame rate
-    if ((row & 63) === 0 && performance.now() - slice > 6) {
+    if ((row & 15) === 0 && performance.now() - slice > 6) {
       await nextTask();
       slice = performance.now();
-    }
-    let delta = 0;
-    for (let col = 0; col < file.width; col++, i++) {
-      const zig = bytes[i] | (bytes[count + i] << 8);
-      delta += (zig >>> 1) ^ -(zig & 1);
-      data[i] = delta + (row > 0 ? data[i-file.width] : 0);
     }
   }
   return { ...file, data };
