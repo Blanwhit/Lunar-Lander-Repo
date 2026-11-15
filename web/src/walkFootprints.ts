@@ -2,6 +2,7 @@ import {
   BufferAttribute, BufferGeometry, DataTexture, DynamicDrawUsage, Group, Mesh,
   MeshStandardMaterial, NearestFilter, RedFormat, Vector2,
 } from 'three';
+import { decodeSoil, encodeSoil, type CastSoilTile } from './castSoil';
 import type { BootPose } from './walkFeet';
 import { type WalkOutsole, soleLength, soleWidth, rimBins } from './walkOutsole';
 import type { WalkGround } from './walkGround';
@@ -24,6 +25,9 @@ const levels = [1,2,4].map(stride => {
 
 class SoilTile {
   readonly displacement = new Float32Array(row*row);
+  revision = 0;
+  sentRevision = -1;
+  lastSent = -Infinity;
   mesh?: Mesh<BufferGeometry,MeshStandardMaterial>;
   base?: Float32Array;
   normals?: Float32Array;
@@ -43,6 +47,9 @@ class SoilTile {
 /** Persistent plastic deformation in metres on a world-aligned 7.8 mm lattice. */
 export class WalkFootprints {
   readonly group = new Group();
+  readonly trailId = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+  private nextSend = 0;
+  private transmissions = 0;
   private readonly tiles = new Map<number,SoilTile>();
   private readonly visible = new Set<SoilTile>();
   private readonly pixels = new Uint8Array(span*span);
@@ -79,6 +86,7 @@ export class WalkFootprints {
     for(let dz=0;dz<=(z===0?1:0);dz++) for(let dx=0;dx<=(x===0?1:0);dx++) {
       const tile=this.tile(tx-dx,tz-dz), a=x+dx*cells,b=z+dz*cells;
       tile.displacement[b*row+a]+=amount;
+      tile.revision++;
       tile.dirty(a,b);
     }
   }
@@ -256,7 +264,41 @@ export class WalkFootprints {
     tile.minX=tile.minZ=row;tile.maxX=tile.maxZ=-1;
   }
 
-  update(x:number,z:number) {
+  // Absolute snapshots can be applied independently after packet loss, late joins or resizing.
+  castTile(time:number,x:number,z:number): CastSoilTile | undefined {
+    if(time < this.nextSend) return;
+    this.nextSend = time + 90;
+    let changed: SoilTile | undefined, refresh: SoilTile | undefined;
+    let changedPriority = -Infinity, refreshPriority = -Infinity;
+    for(const tile of this.visible) {
+      const distance = Math.hypot((tile.x+.5)*tileSize-x,(tile.z+.5)*tileSize-z);
+      const age = time - tile.lastSent;
+      const priority = (Number.isFinite(age) ? age : 1e8) - 150*distance;
+      if(tile.sentRevision !== tile.revision && priority > changedPriority) {
+        changed = tile; changedPriority = priority;
+      }
+      if(age >= 1200 && priority > refreshPriority) {
+        refresh = tile; refreshPriority = priority;
+      }
+    }
+    const tile = this.transmissions % 4 === 3 ? refresh ?? changed : changed ?? refresh;
+    if(!tile) return;
+    this.transmissions++;
+    tile.lastSent=time; tile.sentRevision=tile.revision;
+    return {x:tile.x,z:tile.z,revision:tile.revision,heights:encodeSoil(tile.displacement)};
+  }
+
+  applyCastTile(snapshot:CastSoilTile) {
+    const existing=this.tiles.get(key(snapshot.x,snapshot.z));
+    if(existing && existing.revision >= snapshot.revision) return;
+    const heights=decodeSoil(snapshot.heights);
+    if(!heights) return;
+    const tile=existing ?? this.tile(snapshot.x,snapshot.z);
+    tile.displacement.set(heights); tile.revision=snapshot.revision;
+    tile.dirty(0,0); tile.dirty(cells,cells);
+  }
+
+  update(x:number,z:number,simulate=true) {
     const ox=Math.floor(x/tileSize)-span/2,oz=Math.floor(z/tileSize)-span/2;
     if(this.maskDirty || ox!==this.origin.x || oz!==this.origin.y) {
       this.origin.set(ox,oz);this.pixels.fill(0);
@@ -273,7 +315,7 @@ export class WalkFootprints {
       const d=Math.max(Math.abs((t.x+.5)*tileSize-x),Math.abs((t.z+.5)*tileSize-z));
       const index=levels[d<2.5?0:d<6?1:2];
       if(t.mesh!.geometry.index!==index)t.mesh!.geometry.setIndex(index);
-      if(t.maxX>=0){this.relax(t);this.flush(t);}
+      if(t.maxX>=0){if(simulate)this.relax(t);this.flush(t);}
     }
   }
 

@@ -1,4 +1,3 @@
-import {nativeChannelPrefix,playableEyes,playBufferedEye} from './bufferedEye';
 import {castPeer,castSignal,localSDP,unpack,type SceneFrame} from './castLink';
 import {setCastPresentation} from './castPresentation';
 import type {CastWorld,openCastView} from './castView';
@@ -6,7 +5,7 @@ import type {CastWorld,openCastView} from './castView';
 export function mountCastPanel(world:CastWorld) {
   const host=document.createElement('aside');
   host.className='moon-cast';host.setAttribute('aria-label','Quest casting');
-  host.innerHTML='<dialog class="cast-window" aria-label="Live Quest view" hidden><header><span>Quest view</span><button type="button" aria-label="Resize Quest view">Resize</button><button type="button" aria-label="Close Quest view">Close</button></header><div class="cast-picture"><canvas aria-label="Live view from the Quest"></canvas><video autoplay muted playsinline aria-label="Live astronaut eye view"></video><canvas class="buffered-eye" aria-label="Buffered Quest eye view"></canvas><span class="cast-caption" role="status"></span></div></dialog><div class="cast-status"><span role="status">Connecting to Quest…</span><button type="button" disabled>Cast</button></div>';
+  host.innerHTML='<dialog class="cast-window" aria-label="Live Quest view" hidden><header><span>Quest view</span><button type="button" aria-label="Resize Quest view">Resize</button><button type="button" aria-label="Close Quest view">Close</button></header><div class="cast-picture"><canvas aria-label="Live view from the Quest"></canvas><span class="cast-caption" role="status"></span></div></dialog><div class="cast-status"><span role="status">Connecting to Quest…</span><button type="button" disabled>Cast</button></div>';
   const style=document.createElement('style');
   style.textContent=`
 .moon-cast{position:fixed;z-index:1200;right:12px;bottom:var(--cast-above-hud,84px);display:grid;justify-items:end;gap:6px;color:#eef2f4;font:500 13px/1.35 system-ui,sans-serif}
@@ -24,8 +23,6 @@ export function mountCastPanel(world:CastWorld) {
 .cast-window header span{margin-right:auto}
 .cast-picture{position:relative;background:#090b0e;aspect-ratio:16/10}
 .cast-picture canvas{display:block;width:100%;height:100%}
-.cast-picture video,.cast-picture .buffered-eye{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#06080a;opacity:0;pointer-events:none}
-.cast-picture[data-eye] video:not(.buffered-eye),.cast-picture[data-native] .buffered-eye{opacity:1}
 .cast-caption:not(:empty){position:absolute;bottom:6px;left:7px;padding:3px 6px;background:#141a20de;border-radius:4px}
 body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inset-bottom))}
 @media(max-width:860px){body:has(.walk-scene:not([inert])) .moon-cast{bottom:112px}}
@@ -41,65 +38,11 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   const status=host.querySelector<HTMLElement>('.cast-status span')!;
   const action=host.querySelector<HTMLButtonElement>('.cast-status button')!;
   let canvas=host.querySelector('canvas')!;
-  const video=host.querySelector('video')!;
-  const picture=video.parentElement!;
   const subtitle=host.querySelector<HTMLElement>('.cast-caption')!;
   const caption=(s:string)=>{if(subtitle.textContent!==s)subtitle.textContent=s;};
   let view:ReturnType<typeof openCastView>|undefined,viewId=0;
-  let preferVideo=false;
   const casting=()=>!panel.hidden;
-  const wantsEye=()=>casting() && (preferVideo || (surfaceMode && panel.matches(':modal')));
   let pc:RTCPeerConnection|undefined,ch:RTCDataChannel|undefined;
-  let remoteEye:MediaStreamTrack|undefined,supportsEye=false,surfaceMode=false,frameCallback=0,stall=0;
-  let formats:string[]=[];
-  void playableEyes().then(keys=>{formats=keys;if(casting()&&nativeCapable)watch();});
-  const buffered=host.querySelector<HTMLCanvasElement>('.buffered-eye')!;
-  let nativeCapable=false,token='',nativeFailed=false,nativeTimer=0;
-  let closeReader:(()=>void)|undefined;
-  function showNative(on:boolean){
-    picture.toggleAttribute('data-native',on);
-    view?.mirroring(on||picture.hasAttribute('data-eye'));
-    if(on)caption('');
-  }
-  function stopBuffer(){
-    clearTimeout(nativeTimer);token='';
-    const close=closeReader;closeReader=undefined;close?.();
-  }
-  function failBuffer(){
-    if(!token)return;
-    nativeFailed=true;stopBuffer();if(casting())watch();syncEye();
-  }
-  function showEye(on:boolean){
-    picture.toggleAttribute('data-eye',on);
-    view?.mirroring(on||picture.hasAttribute('data-native'));
-    if(on)caption('');
-  }
-  function detachEye(){
-    clearTimeout(stall);
-    if(frameCallback)video.cancelVideoFrameCallback(frameCallback);
-    frameCallback=0;video.onplaying=video.ontimeupdate=null;video.pause();video.srcObject=null;showEye(false);
-  }
-  function syncEye(){
-    if(token || !wantsEye() || !remoteEye || !supportsEye){
-      if(video.srcObject)detachEye();
-      return;
-    }
-    if(video.srcObject)return;
-    const stream=new MediaStream([remoteEye]);video.srcObject=stream;
-    const frameEvents=typeof video.requestVideoFrameCallback==='function';
-    const presented=()=>{
-      if(video.srcObject!==stream)return;
-      showEye(true);
-      clearTimeout(stall);stall=window.setTimeout(()=>showEye(false),1100);
-      if(frameEvents)frameCallback=video.requestVideoFrameCallback(presented);
-    };
-    if(frameEvents)frameCallback=video.requestVideoFrameCallback(presented);
-    else video.onplaying=video.ontimeupdate=()=>{if(video.videoWidth)presented();};
-    void video.play().catch(error=>{
-      if(video.srcObject!==stream)return;
-      console.warn('Moon headset video playback failed',error);detachEye();
-    });
-  }
   let supportsPacked=false,relayTime:number|undefined;
   let id='',began=0,lastAlive=0,stopped=false,timer=0;
   const stop=new AbortController();
@@ -119,11 +62,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   function consume(f:SceneFrame,relayed=false) {
     if((f.mode==='globe'||f.mode==='surface') && f.head?.length===7 && f.head.every(Number.isFinite) && Number.isFinite(f.time) &&
       Number.isFinite(f.fov) && (f.mode==='surface'?f.site?.length===2&&f.sun?.length===3:f.pivot?.length===3)){
-      const surface=f.mode==='surface' && !relayed;
-      if(surface!==surfaceMode){
-        surfaceMode=surface;stopBuffer();nativeFailed=false;if(casting())watch();
-      }
-      syncEye();view?.frame(f,relayed);
+      view?.frame(f,relayed);
     }
   }
   async function receiveRelay(){
@@ -138,8 +77,6 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
           const state=await castSignal('live',key,{frames:casting(),batched:true,after:relayTime},stop.signal);
           if(state?.online){
             onlineAt=performance.now();connected();
-            if(casting() && !view && preferVideo && !lastAlive)
-              caption('Waiting for headset video. Refresh Moon on this computer if the 3D viewer failed to load.');
           }
           if(casting() && !(lastAlive && performance.now()-lastAlive<5500)){
             for(const f of state?.history??(state?.frame?[state.frame]:[])){consume(f,true);relayTime=f.time;}
@@ -154,7 +91,6 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     if(!stopped)relayTimer=window.setTimeout(receiveRelay,casting() && (!lastAlive||performance.now()-lastAlive>5500)?Math.max(0,65-(performance.now()-started)):1500);
   }
   function reset() {
-    stopBuffer();nativeCapable=nativeFailed=false;detachEye();remoteEye=undefined;supportsEye=surfaceMode=false;
     if(ch){ch.onmessage=null;ch.onclose=null;ch.close();ch=undefined;}
     pc?.close();pc=undefined;id='';lastAlive=0;supportsPacked=false;relayTime=undefined;
     if(performance.now()-onlineAt>11000){
@@ -165,13 +101,13 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   function tell(s:string){if(ch?.readyState==='open')ch.send(s);}
   const resize=host.querySelector<HTMLButtonElement>('[aria-label="Resize Quest view"]')!;
   function expand(on:boolean){
-    stopBuffer();nativeFailed=false;panel.close();
+    panel.close();
     host.toggleAttribute('data-large',on);
     if(on)panel.showModal();else panel.show();
     resize.textContent=on?'Restore':'Resize';
     resize.setAttribute('aria-label',on?'Restore compact Quest view':'Resize Quest view');
     resize.setAttribute('aria-pressed',String(on));
-    setCastPresentation(on?'expanded':'compact');if(casting())watch();syncEye();
+    setCastPresentation(on?'expanded':'compact');
     resize.focus({preventScroll:true});
   }
   resize.setAttribute('aria-pressed','false');
@@ -183,19 +119,13 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)expand(false);
   };
   function watch(){
-    const eye=supportsEye && wantsEye();
-    if(eye && surfaceMode && panel.matches(':modal') && nativeCapable && !nativeFailed && formats.length){
-      if(!token){token=crypto.randomUUID();nativeTimer=window.setTimeout(failBuffer,10000);}
-      tell('watch-buffered:'+token+':'+formats.join(','));return;
-    }
-    tell(eye?'watch-eye':supportsPacked?'watch-packed':'watch');
+    tell(supportsPacked?'watch-packed':'watch');
   }
   function closeView(){
-    stopBuffer();nativeFailed=false;detachEye();surfaceMode=false;
     ++viewId;panel.close();panel.hidden=true;host.removeAttribute('data-large');
     resize.textContent='Resize';resize.setAttribute('aria-label','Resize Quest view');resize.setAttribute('aria-pressed','false');
     setCastPresentation('closed');relayTime=undefined;
-    view?.close();view=undefined;preferVideo=false;
+    view?.close();view=undefined;
     const fresh=canvas.cloneNode(false) as HTMLCanvasElement;
     canvas.replaceWith(fresh);canvas=fresh;
     tell('stop');lease(false);
@@ -207,51 +137,19 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     const version=++viewId;panel.hidden=false;panel.show();action.textContent='Stop casting';action.setAttribute('aria-expanded','true');
     caption('Waiting for Quest view…');
     setCastPresentation('compact');watch();if(!lastAlive)lease(true);
-    const useEye=(reason:unknown)=>{
-      if(viewId!==version || !casting())return;
-      console.warn('Moon spectator scene unavailable',reason);
-      preferVideo=true;
-      if(!picture.hasAttribute('data-eye')&&!picture.hasAttribute('data-native'))
-        caption('Connecting to the headset video…');
-      watch();syncEye();
-    };
-    canvas.addEventListener('webglcontextlost',useEye);
-    canvas.addEventListener('webglcontextrestored',()=>{
-      if(viewId!==version||!view)return;
-      preferVideo=view.shared;watch();syncEye();
-    });
     try{
       const {openCastView}=await import('./castView');
       if(viewId!==version)return;
       view=openCastView(canvas,world,caption);
-      if(view.shared){preferVideo=true;watch();syncEye();}
-      view.mirroring(picture.hasAttribute('data-eye')||picture.hasAttribute('data-native'));
-    }catch(error){useEye(error);}
+    }catch(error){
+      if(viewId!==version)return;
+      console.warn('Moon spectator scene unavailable',error);
+      caption('Could not start the wide 3D view. Close the cast and try again.');
+    }
   };
   host.querySelector<HTMLButtonElement>('[aria-label="Close Quest view"]')!.onclick=closeView;
   function peer(key:string) {
     const current=pc=castPeer(),channel=ch=current.createDataChannel('moon-scene',{ordered:false,maxRetransmits:0});
-    if(typeof current.addTransceiver==='function'){
-      const receiver=current.addTransceiver('video',{direction:'recvonly'}).receiver;
-      if('jitterBufferTarget' in receiver){
-        try{(receiver as RTCRtpReceiver & {jitterBufferTarget:number}).jitterBufferTarget=260;}catch{}
-      }
-      current.ontrack=e=>{
-        if(current!==pc||e.track.kind!=='video')return;
-        remoteEye=e.track;syncEye();
-        e.track.onended=()=>{if(remoteEye===e.track){remoteEye=undefined;detachEye();}};
-      };
-    }
-    current.ondatachannel=e=>{
-      if(current!==pc || !token || e.channel.label!==nativeChannelPrefix+token){e.channel.close();return;}
-      clearTimeout(nativeTimer);
-      const active=token;
-      closeReader=playBufferedEye(e.channel,buffered,on=>{
-        if(on)clearTimeout(nativeTimer);
-        showNative(on);
-      },()=>{if(active===token)failBuffer();});
-      nativeTimer=window.setTimeout(failBuffer,15000);
-    };
     channel.binaryType='arraybuffer';
     id=crypto.randomUUID();began=performance.now();
     channel.onopen=()=>{if(current!==pc)return;lastAlive=performance.now();tell('ping');if(casting())watch();else tell('stop');};
@@ -259,9 +157,6 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
       if(current!==pc)return;
       lastAlive=performance.now();
       connected();
-      if(e.data==='supports-buffered'){nativeCapable=true;if(casting())watch();syncEye();return;}
-      if(token&&e.data==='buffer-failed:'+token){failBuffer();return;}
-      if(e.data==='supports-eye'){supportsEye=true;if(casting())watch();syncEye();return;}
       if(e.data==='supports-packed'){supportsPacked=true;if(casting())watch();return;}
       if(e.data==='alive'||!casting())return;
       try{

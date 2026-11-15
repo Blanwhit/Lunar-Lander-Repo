@@ -19,7 +19,7 @@ import type { HelmetAudio } from './helmetAudio';
 import { HandSamples } from './handSamples';
 import { TerrainPointer } from './terrainPointer';
 import { bootPulse } from './bootHaptics';
-import { sendCastFrame,shareEyeFrame,releaseEyeFrame } from './castLink';
+import { sendCastFrame } from './castLink';
 import { WalkSuit } from './walkSuit';
 import { THIRD_PERSON_LAYER } from './suitGear';
 import { WalkFootprints } from './walkFootprints';
@@ -701,7 +701,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   async function leave(notify = true) {
     if (closed) return;
     closed = true;
-    releaseEyeFrame(renderer);
     abort.abort();
     renderer.setAnimationLoop(null);
     if (activeSession) await activeSession.end().catch(() => {});
@@ -797,7 +796,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
 
   async function returnToGlobe(session: XRSession) {
     choosingLanding = true;
-    releaseEyeFrame(renderer);
     queuedHit = undefined;
     suspendTools();
     try {
@@ -825,17 +823,17 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       return {mode:'surface',time,head:[...castHead.toArray(),...castRotation.toArray()],
         fov:2*Math.atan(1/viewer.views[0].projectionMatrix[5])*180/Math.PI,
         site:[centre.lat,centre.lon],sun:sun.toArray(),light:sunlight.intensity,
+        trail:prints.trailId,soil:prints.castTile(time,castHead.x,castHead.z),
         heat:!!scores?.overlay.enabled,score:scoreMarker.visible?scoreText:undefined,
         body:suit.group.visible?suit.castPose():undefined,
         ship:missionLocal?mission.castState():undefined,
         samples:samples.castState(),pointer:terrainPointer.ring.visible?terrainPointer.ring.position.toArray():undefined};
     });
   }
-  function drawWalk(time:number,viewer:XRViewerPose|null){
+  function drawWalk(time:number){
     if(!activeSession && !backgroundRenderDue(time,lastDesktopDraw))return;
     lastDesktopDraw=time;
     renderer.render(scene,camera);
-    if(viewer)shareEyeFrame(time,renderer,viewer.views[0]);
   }
   function walkFrame(time:number, frame?:XRFrame) {
     if (closed) return;
@@ -953,7 +951,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       }
       mission.advance(missionDt,astronautEye,astronautRotation);
       if(mission.view==='Landing camera' && mission.glideProgress>=1){
-        drawWalk(time,viewer);
+        drawWalk(time);
         setMissionView('Surface');
         lookIntro=viewer?-1:0;
         return;
@@ -984,7 +982,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         glareLook.applyQuaternion(rig.quaternion);
         glare.update(viewEye,sun,site.sunAngularRadius??.00465,site.height,glareLook,dt);
         applySunlight();
-        terrainPointer.hide();shareSurface(time,viewer);drawWalk(time,viewer);return;
+        terrainPointer.hide();shareSurface(time,viewer);drawWalk(time);return;
       }
     }
     forwardDir.y = 0;
@@ -994,7 +992,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     head.copy(rig.position).add(headOffset);
     const east = forwardDir.x * stick.y - forwardDir.z * stick.x;
     const south = forwardDir.z * stick.y + forwardDir.x * stick.x;
-    if(relocating){drawWalk(time,viewer);return;}
+    if(relocating){drawWalk(time);return;}
     // Short substeps resolve the surface crossing even when the render cadence varies.
     const steps = Math.ceil(dt * 120);
     if (!steps) gait.supportY = walkSupport.surfaceAt(head.x, head.z, stanceRadius);
@@ -1068,6 +1066,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     glare.update(glareEye, sun, site.sunAngularRadius ?? 0.00465, site.height, glareLook, dt);
     applySunlight();
     shareSurface(time,viewer);
-    drawWalk(time,viewer);
+    drawWalk(time);
   }
 }

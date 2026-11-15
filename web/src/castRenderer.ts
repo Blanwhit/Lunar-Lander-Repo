@@ -17,7 +17,7 @@ export function castRenderer(canvas: HTMLCanvasElement, globe: WebGLRenderer) {
     canvas.width = canvas.height = 1;
     canvas.style.transform = 'scaleY(-1)';
     return {
-      renderer: globe, shared: true,
+      renderer: globe,
       resize(width: number, height: number) {
         canvas.width = width; canvas.height = height;
         target.setSize(width, height);
@@ -44,7 +44,7 @@ export function castRenderer(canvas: HTMLCanvasElement, globe: WebGLRenderer) {
   }
   dedicated.shadowMap.enabled = true;
   return {
-    renderer: dedicated, shared: false,
+    renderer: dedicated,
     resize(width: number, height: number) { dedicated.setSize(width, height, false); },
     draw(render: () => void) { render(); },
     close() { dedicated.dispose(); dedicated.forceContextLoss(); },
