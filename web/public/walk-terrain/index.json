@@ -1,0 +1,78 @@
+{
+  "faces": [
+    {
+      "file": "face-0.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": -332
+    },
+    {
+      "file": "face-1.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": 1308
+    },
+    {
+      "file": "face-2.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": 144
+    },
+    {
+      "file": "face-3.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": 1832
+    },
+    {
+      "file": "face-4.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": -180
+    },
+    {
+      "file": "face-5.bin",
+      "width": 1025,
+      "step": 1,
+      "offset": -928
+    }
+  ],
+  "patches": [
+    {
+      "file": "taurus-littrow.bin",
+      "width": 257,
+      "step": 0.25,
+      "offset": -1664,
+      "lat": 20.1908,
+      "lon": 30.7717,
+      "spacing": 256
+    },
+    {
+      "file": "tycho.bin",
+      "width": 257,
+      "step": 0.25,
+      "offset": -902,
+      "lat": -43.31,
+      "lon": -11.36,
+      "spacing": 256
+    },
+    {
+      "file": "south-pole.bin",
+      "width": 513,
+      "step": 0.25,
+      "offset": -454,
+      "lat": -89.33,
+      "lon": 129.8,
+      "spacing": 96
+    },
+    {
+      "file": "shackleton-rim.bin",
+      "width": 1025,
+      "step": 0.25,
+      "offset": 329,
+      "lat": -89.33,
+      "lon": 129.8,
+      "spacing": 5.25
+    }
+  ]
+}

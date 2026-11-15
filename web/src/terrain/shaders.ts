@@ -213,7 +213,15 @@ vec3 toSRGB(vec3 c) {
 
 void main() {
   vec3 d = normalize(vDirB);
-  vec3 c = texture(uStars, uBodyToJ2000 * d).rgb * uStarGain;   // display-referred
+  vec3 starDir = uBodyToJ2000 * d;
+#ifdef WALK_SKY
+  // Use the pixel's angular footprint to select a continuous LOD across all six faces.
+  float radiansPerPixel = max(length(dFdx(starDir)), length(dFdy(starDir)));
+  float texels = radiansPerPixel * float(textureSize(uStars, 0).x) * 0.5;
+  vec3 c = textureLod(uStars, starDir, log2(max(texels, 1.0))).rgb * uStarGain;
+#else
+  vec3 c = texture(uStars, starDir).rgb * uStarGain;
+#endif
 
   // ---- Sun
   if (uSun.w > 0.0) {

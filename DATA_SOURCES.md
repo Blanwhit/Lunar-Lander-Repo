@@ -110,23 +110,13 @@ deeper tiles reuse that texture.
 
 | Product | Publisher | URL | Version | Resolution | Frame | Size |
 |---|---|---|---|---|---|---|
-| **Deep Star Maps 2020**, stars layer `hiptyc_2020_16k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (celestial set) | 16384 × 8192 (45.5 px/deg) | **ICRF/J2000 equatorial**, plate carrée, centred on RA 0h, RA increasing to the left | 71 MB |
-| **Deep Star Maps 2020**, Milky Way layer `milkyway_2020_8k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (celestial set) | 8192 × 4096 (22.8 px/deg) | same | 137 MB |
+| **Deep Star Maps 2020**, `starmap_2020_16k.exr` | NASA Scientific Visualization Studio | https://svs.gsfc.nasa.gov/4851 | 2020 (galactic set updated 2021-01-04; we use the celestial set) | 16384 × 8192 (45.5 px/deg) | **ICRF/J2000 equatorial**, plate carrée, centred on RA 0h, RA increasing to the left | 443 MB |
 
-The stars layer is Hipparcos-2 + Tycho-2 point sources on an exactly black background; the Milky
-Way layer is the diffuse glow built from Gaia DR2 (1.7 billion stars). Until 2026-11-14 the
-viewer used the combined `starmap_2020_8k.exr`; the separate layers let the stars stay crisp
-points while the Milky Way is graded on its own (its packed copy is still in `data/raw_packed`). Credit: "NASA/Goddard Space
+Built from Hipparcos-2, Tycho-2 and Gaia DR2 (1.7 billion stars). Credit: "NASA/Goddard Space
 Flight Center Scientific Visualization Studio. Gaia DR2: ESA/Gaia/DPAC. Constellation boundaries:
 IAU." The challenge resources contain no star data.
 
-The pipeline composites the two layers in linear light at 8192 × 4096: the stars layer is
-area-averaged down by 2 (faint stars stay single pixels), multiplied by `star_gain`, and only the
-part of a star above `bloom_threshold` feeds a small Gaussian bloom, so bright stars stand out
-without blurring faint ones. The Milky Way gets its black point at the median sky, is partly
-desaturated (`milkyway_saturation`) and kept faint (`milkyway_gain`). All settings are in
-`pipeline/config.json` under `stars`. The result is resampled into OpenGL-convention cubemaps:
-512² for the first frames and 2048² (about 1 face pixel per source pixel) afterwards, both ETC1S.
+The VR build resamples the celestial map into OpenGL cubemaps with 4096, 2048, and 512 pixels per face. The viewer loads the highest resolution supported by the GPU and uses the encoded mipmaps as stars get smaller on screen. The 16K source has about one quarter of the 8K source’s median pixel intensity, so the display gain is four times higher.
 
 ## 5. Sun and Earth positions (time-dependent)
 
@@ -182,3 +172,24 @@ through `setOrientationProvider()` in [web/src/orientation.ts](web/src/orientati
 * Basis Universal `basisu` v1.50.0, built from [BinomialLLC/basis_universal](https://github.com/BinomialLLC/basis_universal)
   tag `v1_50_0_2`. Encodes the KTX2 colour (ETC1S) and star (UASTC + Zstandard) textures.
 * OpenCV 5 to read OpenEXR, numpy, scipy, Pillow.
+
+## 9. Rocks in the VR surface walk
+
+The walk uses NASA Astromaterials 3D scans and photographic textures of Apollo specimens 15016,0 (basalt), 14316,0 (regolith breccia), and 60025,241 (anorthosite). The models have three levels of detail for stereo rendering. The simulation varies their size, orientation, and burial depth and generates their locations across the Moon. [Sample links and NASA credit](web/public/lunar-rocks/CREDITS.txt)
+
+The walking field queries the landing coordinates and surrounding terrain tiles. The LRO Diviner V6 nighttime rock abundance mosaic estimates fractional surface cover by thermally detectable rocks. Our bundled 8-samples/degree grid retains measured cells across 98.23% of the lunar surface. Its north–south spacing is about 3.8 km. Two 2° patches around Apollo 17 and Tycho retain the native 237 m spacing. A valid zero is retained. A missing native cell falls back to its regional value, and an unmapped area uses the labeled mapped-area mean of 0.343%. [PDS product and calibration](https://pds-geosciences.wustl.edu/lro/urn-nasa-pds-lro_diviner_derived1/data_derived_gdr_l3/cylindrical/jp2/dgdr_ra_avg_cyl_128_jp2.lbl)
+
+For nominal diameters from 0.3 m, the walker estimates a size distribution using the Li–Wu lunar relationship. It solves for total cover such that modeled cover above 1 m matches Diviner. The instrument's effective size threshold varies with the rock population. For each size interval the walker divides modeled cover by the mean exposed plan area of its scanned shapes, estimated at 0.53 times nominal diameter squared. Sub-30 cm fragments and the close-up dust are illustrative. [Li & Wu (2018)](https://doi.org/10.1029/2017JE005496) · [Diviner size-threshold comparison](https://doi.org/10.1029/2024JE008769)
+
+Where LROC Narrow Angle Camera counts are available between 60°S and 60°N, they determine the expected numbers of 4.5–10 m, 10–30 m and larger boulders per square kilometre. Within each observed size class, diameters are drawn from the survey’s global cumulative diameter distribution. The density maps report detections and can miss rocks obscured by illumination or image resolution. The derived grids preserve measured zeros and missing cells separately. Rock centres are simulated reproducibly within a landing. Distant instances are limited in dense fields to preserve foreground detail on the headset. Size-bin maps and diameter curve by Ben Aussel (2025), converted to a compact logarithmic encoding under CC BY 4.0. [Dataset](https://doi.org/10.5281/zenodo.15520275) · [Study](https://doi.org/10.1029/2025JE008981) · [License](https://creativecommons.org/licenses/by/4.0/)
+
+## 10. Soil in the surface walk
+
+The VR ground combines NASA LROC regional reflectance and the viewer’s measured elevation grids with representative close-range detail. The photographed 4 m soil tile comes from a terrestrial lunar-regolith simulant at Spaceport Rostock. It supplies color, surface normals, and fine height variation at the scan’s physical scale. Crater walls and mountains in the walk mesh follow the elevation grid. Fine grains, rock placements and boot-scale soil deformation are simulated. [Soil material credits](web/public/lunar-soil/CREDITS.txt)
+
+
+The first-person suit uses NASA’s Extravehicular Mobility Unit model, adapted for a helmet view with articulated knees, ankles and controller-tracked arms. [Suit credits](web/public/astronaut/CREDITS.txt)
+
+The deformable walking surface uses a local pressure–sinkage approximation. Its nominal 2 cm sinkage near 7 kPa and 4.6 mm transverse tread relief are based on the Apollo 14 crew’s bootprint observations. Soil stiffness, loading time and the division between compaction and displaced grains are simulation parameters. [Apollo 14 Preliminary Science Report, soil mechanics](https://www.nasa.gov/wp-content/uploads/static/history/alsj/a14/as14psr.pdf)
+
+For arbitrary landings, the viewer bundles regional tiles sampled from the PDS LOLA LDEM_64 product at 32 samples per degree (about 948 m north–south), plus measured polar and local grids. It also requests numeric LOLA elevation tiles from a public image service at approximately 167 m north–south posting. The loader converts the service’s half-metre digital numbers to metres and uses the bundled data if the service is unavailable. The location readout reports the approximate spacing in use. [LOLA archive](https://pds-geosciences.wustl.edu/missions/lro/lola.htm) · [LOLA elevation tile service](https://www.arcgis.com/home/item.html?id=4b6494b2c8214f4088fe63a86063750a)

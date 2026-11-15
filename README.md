@@ -32,6 +32,16 @@ bar along the bottom:
   Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
   `#2,84,40000,270,82,2026-01-10T12:00Z`.
 
+## Surface walking in VR
+
+Open the HTTPS Site directly in a WebXR headset browser. Right-click any point on the globe and choose **Enter VR** in its site popup: the camera flies down to the spot and opens the surface walk. There, **Enter headset** starts the immersive session and **Exit VR** returns to the globe. Drag the globe to see the far side. Physical steps move the viewpoint. On Quest 2 the left stick steers, the right stick turns, the left grip runs with stick input, and A jumps. Hold the right index trigger to sprint forward, or steer the sprint with the left stick. Releasing the trigger preserves airborne momentum and lets foot contact slow the astronaut toward the selected walking pace or a stop. A running jump carries your horizontal velocity through flight. The suit follows your head and controller positions. On desktop, click terrain to travel, drag to look, move with WASD or the arrow keys, hold Shift to run, and press Space to jump.
+
+In a Quest session, raise the left wrist to read the navigator. Aim the right controller at terrain, hold **B** to preview the point, and release **B** to mark it. The wrist shows surface distance, bearing, elevation difference and approach direction. Crouch and hold the **right grip** against a loose rock to lift it. Turn your hand to inspect the scan and release the grip while moving to toss it. The wrist identifies its Apollo source and the dimensions of the original curated piece. The helmet soundscape models ventilation, breathing and transmitted boot impacts. Each boot contact pulses its corresponding controller when haptics are available.
+
+The surface view reports east-positive longitude, latitude, elevation above the 1,737.4 km lunar reference sphere, and approximate elevation-grid spacing. It uses measured topography at its geographic location, including lunar curvature. The terrain around a landing can load a roughly 167 m LOLA grid. A bundled 948 m grid covers the whole Moon, with finer local and polar data where available. The surface readout shows regional rock cover from Diviner and the surveyed density of boulders at least 4.5 m across where LROC imagery provides counts. Elsewhere it labels the estimate. Individual rock positions, grains and footprints are simulated. The walk is lit by simulated daylight, so every site (polar and night-side ones included) is walkable. The Sun's glare is the same pass as in the orbital view, faded by how much of the disc the walk terrain leaves visible.
+
+To regenerate the walking grids from the full local tile build, run `.venv/bin/python pipeline/export_walk_terrain.py` and `.venv/bin/python pipeline/export_walk_regions.py` from the repository root. The hosted headset test includes orbital tile levels 0–2 and the full walking grids. The local build includes the complete orbital tile pyramid.
+
 ## Build and run
 
 ### Just run the viewer
@@ -69,7 +79,7 @@ instead of `.venv/Scripts/python` (the Makefile picks the right one).
 |---|---|---|---|---|
 | 1 | `make venv` | creates `.venv` and installs [requirements.txt](pipeline/requirements.txt) (numpy, scipy, rasterio/GDAL, OpenEXR, opencv, zstandard, ...) | `.venv/` | a few min |
 | 2 | `make web` | `npm install` in `web/` | `web/node_modules/` | ~1 min |
-| 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star layers, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
+| 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star map, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
 | 4 | `make basisu` | fetches Basis Universal v1_50_0_2 from GitHub and compiles it with g++ | `tools/basisu(.exe)` | a few min |
 | 5 | `make tiles` | overviews → heights → colour → stars → meta → stats → ephem → earth (see below) | `web/public/tiles/` (3.2 GB), `web/public/ephem/`, `web/public/sky/earth.jpg` | ~50 min |
 | 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | ~40 min |
@@ -84,7 +94,7 @@ instead of `.venv/Scripts/python` (the Makefile picks the right one).
 | `overviews` | cached 2×2-mean pyramids of every source DEM | the DEMs in `data/raw` |
 | `heights` | cube-sphere height tiles L0–L11 (`MAX_LEVEL`, default 11) with `WORKERS` processes (default 24) | `overviews` |
 | `colour` | KTX2 colour tiles L0–L5 | `data/raw/lroc_color.exr`, `tools/basisu` |
-| `stars` | star cubemaps (512² and 2048²) from the stars and Milky Way layers | the two `*_2020_*.exr` files, `tools/basisu` |
+| `stars` | star cubemaps (512², 2048² and 4096²) from the 16K celestial star map | `starmap_2020_16k.exr`, `tools/basisu` |
 | `meta` | writes `tiles/meta.json` (levels, star files) | the steps above |
 | `stats` | prints the table in [Tile pyramid](#tile-pyramid-output-of-make-stats) | `heights`, `colour` |
 | `ephem` | Sun/Earth state vectors 2000–2050 from the JPL Horizons API, validated against Horizons' sub-solar and sub-Earth points | network |
@@ -128,7 +138,7 @@ step 6):
  "tileN": 256,
  "grid": 259,
  "radius": 1737400.0,
- "stars": ["stars_512.ktx2", "stars_2048.ktx2"],
+ "stars": ["stars_512.ktx2", "stars_2048.ktx2", "stars_4096.ktx2"],
  "feasibility": {"format": "MLF1", "samples": 64, "azimuths": 64, "maxLevel": 6,
                  "globalLevel": 3, "polarLat": 84.0, "referenceYear": 2026}
 }
@@ -331,7 +341,7 @@ after lossless compaction:
   texture, but not the tiles. Either rebuild them (see
   [Build everything from scratch](#build-everything-from-scratch)) or copy
   `web/public/tiles/` across separately. On GitHub, the code and tiles together are about
-  3.2 GB. Every tile is under 75 KB (the largest file is the 4.4 MB star cubemap), but GitHub
+  3.2 GB. Every tile is under 75 KB (the largest files are the star cubemaps), but GitHub
   caps a single push at 2 GB, so committing
   the tiles would take several pushes. Attaching them to a GitHub Release as archives keeps the
   repository small. The raw data shouldn't go to GitHub: it's public NASA data (`make download`),
@@ -376,10 +386,8 @@ after lossless compaction:
    trilinearly like the heights and stored as KTX2 with mipmaps: ETC1S for L0–L1 (small initial
    load) and UASTC + zstd for L2–L5 (no chroma blocking when magnified). Deeper tiles reuse the L5
    texture with a UV transform.
-5. **Stars**: the SVS Deep Star Map (J2000) stars layer (16k, crisp points; only the brightest
-   stars get a small bloom) and its Milky Way layer (faint, partly desaturated) are composited and
-   resampled into OpenGL-convention cubemaps. A 512² cubemap loads first and a 2048² one
-   afterwards.
+5. **Stars** use NASA’s 16K celestial map. A 512² cubemap covers the first frames while the
+   viewer loads the 4096² sky independently of terrain. A 2048² version serves smaller GPUs.
 6. **Ephemeris** ([ephemeris.py](pipeline/ephemeris.py)): the Horizons API sends no CORS
    headers, so the browser can't query it live. The pipeline fetches Moon-centred (`500@301`),
    light-time-corrected ICRF state vectors (position + velocity) of the Sun and the Earth every
@@ -511,11 +519,11 @@ so the terrain cost dominates. They haven't been re-measured.
 * Streaming: finished tiles are promoted to the GPU at least 1 and at most 8 per frame, within a
   3 ms budget that includes the texture uploads (`renderer.initTexture` while promoting, not later
   inside `render`). Before this throttle, frames during fast flights spiked to 87–132 ms p95. With
-  it they stay at 5–6 ms (a fresh 3 km polar view: 284 tiles, p95 3.1 ms, worst 5.4 ms). The large
-  star cubemap (a one-off upload of several MB) is swapped in only while no tiles stream and the
-  camera is at rest.
+  it they stay at 5–6 ms (a fresh 3 km polar view: 284 tiles, p95 3.1 ms, worst 5.4 ms). After the 512²
+  preview, the largest star cubemap the GPU supports is loaded right away, independently of the
+  terrain streaming.
 
-### Initial payload (production build, measured)
+### Initial payload (original browser build, measured)
 
 Everything fetched until the first frame that has all six L0 terrain tiles, their colour, the
 star background and the Sun/Earth positions. The 145 KB Earth texture loads right after:
@@ -531,8 +539,7 @@ star background and the Sun/Earth positions. The 145 KB Earth texture loads righ
 | **total** | **1.47 MB** (1.20 MB with gzipped wasm) |
 
 On localhost the first full frame, including the Sun and Earth, appears about 0.13–0.35 s after
-the app starts. Refinement requests are held back until the base level is complete. The 4.3 MB
-2048² star cubemap is fetched only once the tile queue is idle.
+the app starts. Refinement requests are held back until the base level is complete. These measurements predate the VR branch’s higher-resolution sky.
 
 ### Visual verification (automated captures)
 
@@ -563,8 +570,8 @@ date/time and compass.
   DE441-based ephemerides via the Horizons API.
 * **Earth image**: NASA Blue Marble (NASA Earth Observatory / SVS 2915, Reto Stöckli et al.);
   clouds from NASA Goddard SVS 3615.
-* **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020, stars layer (Hipparcos-2,
-  Tycho-2) and Milky Way layer (Gaia DR2 / ESA/Gaia/DPAC).
+* **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020, 16K celestial map
+  (Hipparcos-2, Tycho-2, Gaia DR2 / ESA/Gaia/DPAC).
 * Challenge: NASA Space Apps 2026, *Lunar Landing Site Navigator*. The resources it lists
   (QuickMap, Moon Trek, Horizons, CSA) were evaluated; see DATA_SOURCES.md for why the raw PDS
   products were used instead.

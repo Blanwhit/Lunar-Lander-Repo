@@ -143,17 +143,10 @@
    ]
   },
   {
-   "name": "hiptyc_2020_16k.exr",
+   "name": "starmap_2020_16k.exr",
    "group": "stars",
    "urls": [
-    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/hiptyc_2020_16k.exr"
-   ]
-  },
-  {
-   "name": "milkyway_2020_8k.exr",
-   "group": "stars",
-   "urls": [
-    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/milkyway_2020_8k.exr"
+    "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_16k.exr"
    ]
   },
   {

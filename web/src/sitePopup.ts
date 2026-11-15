@@ -104,6 +104,8 @@ export class SitePopup {
   onClose: () => void = () => {};
   /** called when "More info" is clicked */
   onMoreInfo: () => void = () => {};
+  /** called when "Enter VR" is clicked: land at this site and open the surface walk */
+  onEnterVR: () => void = () => {};
 
   constructor(parent: HTMLElement) {
     const style = document.createElement('style');
@@ -128,7 +130,7 @@ export class SitePopup {
     this.feas = el.querySelector('.feas') as HTMLDivElement;
     (el.querySelector('.close') as HTMLButtonElement).addEventListener('click', () => this.close());
     (el.querySelector('[data-act="info"]') as HTMLButtonElement).addEventListener('click', () => this.onMoreInfo());
-    // "Enter VR": intentionally no action yet
+    (el.querySelector('[data-act="vr"]') as HTMLButtonElement).addEventListener('click', () => this.onEnterVR());
     for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const) el.addEventListener(ev, (e) => e.stopPropagation());
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.open) this.close();

@@ -2,7 +2,7 @@
 // the lunar limb / horizon like lens glare does. Bright aureole + wide veil + six thin
 // diffraction spikes, scaled by how much of the solar disc the camera can actually see
 // (one ray marched over the loaded terrain per frame; see sunVisibleFraction).
-import { AdditiveBlending, BufferGeometry, GLSL3, Matrix3, Mesh, RawShaderMaterial, Vector3 } from 'three';
+import { AdditiveBlending, BufferAttribute, BufferGeometry, GLSL3, Matrix3, Mesh, PerspectiveCamera, RawShaderMaterial, Sphere, Vector3 } from 'three';
 import { H_MAX_GLOBAL, H_MIN_GLOBAL, R_MOON, type Vec3 } from './geom';
 
 const glareVS = /* glsl */ `
@@ -16,11 +16,37 @@ void main() {
 }
 `;
 
+// Surface walk (incl. WebXR stereo): one full-screen triangle per eye; the tangent-plane
+// coordinates include the eye's asymmetric projection, and the Sun is moved into view space
+// per eye (it is a constant, so it is passed down as flat varyings).
+const surfaceGlareVS = /* glsl */ `
+precision highp float;
+in vec2 position;
+uniform mat4 viewMatrix, projectionMatrix;
+uniform vec3 uSunW;         // world (landing frame) direction towards the Sun (unit)
+out vec2 vT;
+flat out vec3 vSunV;
+flat out vec2 vSunT;
+void main() {
+  vT = (position + projectionMatrix[2].xy) / vec2(projectionMatrix[0][0], projectionMatrix[1][1]);
+  vSunV = normalize(mat3(viewMatrix) * uSunW);
+  vSunT = vSunV.z < -1e-6 ? vSunV.xy / -vSunV.z : vSunV.xy * 1e3;
+  gl_Position = vec4(position, 1.0, 1.0);
+}
+`;
+
 const glareFS = /* glsl */ `
 precision highp float;
 in vec2 vT;
+#ifdef SURFACE_GLARE
+flat in vec3 vSunV;
+flat in vec2 vSunT;
+#define uSunV vSunV
+#define uSunT vSunT
+#else
 uniform vec3 uSunV;         // Sun direction in view space (unit)
 uniform vec2 uSunT;         // Sun on the tangent plane: uSunV.xy / -uSunV.z
+#endif
 uniform float uSunR;        // angular radius (rad)
 uniform float uVis;         // visible fraction of the disc, 0..1
 uniform float uPix;         // angular size of one pixel (rad)
@@ -140,4 +166,104 @@ export function sunVisibleFraction(cam: Vec3, d: Vector3, sunR: number, heightAt
     }
   }
   return margin === Infinity ? 1 : discFraction(margin, sunR);
+}
+
+const COS_100 = Math.cos((100 * Math.PI) / 180);
+
+/**
+ * The same glare for the surface walk (desktop preview and WebXR). The visible fraction of
+ * the disc comes from a ray marched over the walk terrain towards the Sun's azimuth: the
+ * highest terrain elevation angle along it is the local horizon (crater rims, massifs, and
+ * the curvature drop, which the walk heights already include).
+ */
+export class SurfaceSunGlare {
+  readonly mesh: Mesh;
+  private mat: RawShaderMaterial;
+  private vis = 0;
+  private target = 0;
+  private sinceCheck = Infinity;
+  private readonly checkedAt = new Vector3(Infinity, 0, 0);
+  private readonly checkedSun = new Vector3();
+  private readonly look = new Vector3();
+
+  constructor() {
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array([-1, -1, 3, -1, -1, 3]), 2));
+    geometry.boundingSphere = new Sphere(new Vector3(), 1);
+    this.mat = new RawShaderMaterial({
+      glslVersion: GLSL3,
+      defines: { SURFACE_GLARE: 1 },
+      vertexShader: surfaceGlareVS,
+      fragmentShader: glareFS,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      blending: AdditiveBlending,
+      uniforms: {
+        uSunW: { value: new Vector3(0, 1, 0) },
+        uSunR: { value: 0.00465 },
+        uVis: { value: 0 },
+        uPix: { value: 0.001 },
+      },
+    });
+    this.mesh = new Mesh(geometry, this.mat);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 1000; // after the ground, rocks and suit
+    this.mesh.visible = false;
+    this.mesh.onBeforeRender = (renderer, _scene, camera) => {
+      const h = renderer.xr.isPresenting
+        ? (camera as PerspectiveCamera).viewport?.w ?? renderer.domElement.height
+        : renderer.domElement.height;
+      this.mat.uniforms.uPix.value = 2 / (Math.max(1, h) * camera.projectionMatrix.elements[5]);
+      this.mat.uniformsNeedUpdate = true;
+    };
+  }
+
+  /**
+   * @param eye     eye position in the landing frame (m)
+   * @param sun     unit direction towards the Sun in the landing frame
+   * @param sunR    angular radius of the Sun (rad)
+   * @param heightAt walk terrain height (m, landing frame) at local (x, z)
+   * @param forward current view direction (for skipping the pass when the Sun is far behind)
+   */
+  update(eye: Vector3, sun: Vector3, sunR: number, heightAt: (x: number, z: number) => number, forward: Vector3, dt: number) {
+    // the march is cheap but not free: redo it when the eye or the Sun moved, or 4x a second
+    this.sinceCheck += dt;
+    if (this.sinceCheck > 0.25 || this.checkedAt.distanceToSquared(eye) > 0.25 || this.checkedSun.dot(sun) < 0.999999) {
+      this.sinceCheck = 0;
+      this.checkedAt.copy(eye);
+      this.checkedSun.copy(sun);
+      this.target = surfaceSunVisibleFraction(eye, sun, sunR, heightAt);
+    }
+    this.vis += (this.target - this.vis) * (1 - Math.exp(-dt * 14));
+    if (Math.abs(this.target - this.vis) < 0.004) this.vis = this.target;
+    const u = this.mat.uniforms;
+    (u.uSunW.value as Vector3).copy(sun);
+    u.uSunR.value = sunR;
+    u.uVis.value = this.vis;
+    this.look.copy(forward).normalize();
+    this.mesh.visible = this.vis > 0.002 && this.look.dot(sun) > COS_100;
+  }
+
+  dispose() {
+    this.mesh.geometry.dispose();
+    this.mat.dispose();
+  }
+}
+
+/** visible fraction of the solar disc from `eye` over the walk terrain (see SurfaceSunGlare) */
+export function surfaceSunVisibleFraction(eye: Vector3, sun: Vector3, sunR: number, heightAt: (x: number, z: number) => number): number {
+  const horiz = Math.hypot(sun.x, sun.z);
+  const elev = Math.atan2(sun.y, horiz);
+  if (horiz < 1e-6) return elev > 0 ? 1 : 0;
+  const ux = sun.x / horiz, uz = sun.z / horiz;
+  let margin = Infinity;
+  for (let t = 2; t < 60000; t += Math.max(2, t * 0.04)) {
+    const m = elev - Math.atan2(heightAt(eye.x + ux * t, eye.z + uz * t) - eye.y, t);
+    if (m < margin) {
+      margin = m;
+      if (margin < -sunR) return 0;
+    }
+  }
+  return discFraction(margin, sunR);
 }

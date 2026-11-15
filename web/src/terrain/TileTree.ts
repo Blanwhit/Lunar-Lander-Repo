@@ -295,8 +295,8 @@ export class TileTree {
     return Math.max((P * t) / this.opts.pixelsPerTexel, 2.5 * TILE_N * Math.SQRT2 * t);
   }
 
-  update(fi: FrameInfo): TileNode[] {
-    this.drainArrivals();
+  update(fi: FrameInfo, moving = false): TileNode[] {
+    this.drainArrivals(moving);
     const P = fi.viewportHeight / (2 * Math.tan(fi.fovY / 2));
     this.tmpM.setFromMatrix3(fi.viewRot);
     this.tmpM.premultiply(fi.proj);
@@ -458,17 +458,20 @@ export class TileTree {
   }
 
   /** promote a few finished downloads per frame (bounded GPU upload work per frame): at least
-   *  one height tile, then more while the ~3 ms budget lasts (uploads included, see uploadTexture) */
-  private drainArrivals() {
+   *  one height tile, then more while the ~3 ms budget lasts (uploads included, see uploadTexture).
+   *  While the camera moves (flights, landing approach) the per-frame counts are lower still. */
+  private drainArrivals(moving: boolean) {
     const t0 = performance.now();
     const BUDGET_MS = 3;
     let k = 0;
-    while (this.arrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < 8) {
+    const heightLimit = moving && this.baseReady ? 2 : 8;
+    while (this.arrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < heightLimit) {
       this.onHeight(this.arrivals.shift()!);
       k++;
     }
     k = 0;
-    while (this.colourArrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < 4) {
+    const colourLimit = moving && this.baseReady ? 1 : 4;
+    while (this.colourArrivals.length && (k < 1 || performance.now() - t0 < BUDGET_MS) && k < colourLimit) {
       const [n, tex] = this.colourArrivals.shift()!;
       if (n.colourState === LOADING) {
         n.colourTex = tex;
