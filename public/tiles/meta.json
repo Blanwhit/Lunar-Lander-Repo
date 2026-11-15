@@ -1,0 +1,22 @@
+{
+ "format": "MLH1",
+ "maxLevel": 2,
+ "colourMaxLevel": 2,
+ "tileN": 256,
+ "grid": 259,
+ "radius": 1737400.0,
+ "stars": [
+  "stars_512.ktx2",
+  "stars_2048.ktx2",
+  "stars_4096.ktx2"
+ ],
+ "feasibility": {
+  "format": "MLF1",
+  "samples": 64,
+  "azimuths": 64,
+  "maxLevel": 2,
+  "globalLevel": 2,
+  "polarLat": 84.0,
+  "referenceYear": 2026
+ }
+}
