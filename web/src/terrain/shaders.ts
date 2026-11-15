@@ -115,6 +115,10 @@ uniform float uAmbient;
 uniform float uExposure;
 uniform vec3 uEarthDir;      // body-frame unit vector towards the Earth
 uniform float uEarthshine;   // earthshine intensity (scaled by the Earth's phase)
+uniform sampler2D uDustMap;
+uniform sampler2D uDustNormal;
+uniform vec3 uDustOrigin;
+uniform float uDustReady;
 uniform sampler2D uFeas;     // feasibility score (R8, 0..1 = 0..100 %), corner-aligned samples
 uniform vec3 uFeasXf;        // (scale, offsetU, offsetV): tile uv -> score tile uv
 uniform float uFeasOn;       // 1 = draw the heatmap
@@ -125,6 +129,23 @@ out vec4 fragColor;
 vec3 toSRGB(vec3 c) {
   c = max(c, 0.0);
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+// Project the scan in body-fixed metres. Blending three planes avoids polar seams.
+vec3 grainPlane(vec2 metres) {
+  vec2 uv = metres * 0.25; // 4 m per scan
+  vec2 alternate = vec2(-uv.y, uv.x) + vec2(0.31, 0.17);
+  float blendWeight = smoothstep(-0.7, 0.7, sin(metres.x * 0.39269908) + sin(metres.y * 0.19634954));
+  vec3 a = texture(uDustNormal, uv).xyz * 2.0 - 1.0;
+  vec3 b = texture(uDustNormal, alternate).xyz * 2.0 - 1.0;
+  vec2 slope = mix(a.xy / max(a.z, 0.4), vec2(b.y, -b.x) / max(b.z, 0.4), blendWeight);
+  float grain = mix(texture(uDustMap, uv).g, texture(uDustMap, alternate).g, blendWeight);
+  // Gentle metre-scale mottling keeps the transition to the regional mosaic gradual.
+  vec2 bed = metres / 64.0;
+  vec3 bedNormal = texture(uDustNormal, bed).xyz * 2.0 - 1.0;
+  float drift = texture(uDustMap, bed).g;
+  slope += 0.8 * bedNormal.xy / max(bedNormal.z, 0.4);
+  return vec3(slope, clamp(1.0 + 7.0 * (grain - 0.207) + 6.0 * (drift - 0.207), 0.55, 1.45));
 }
 
 void main() {
@@ -141,6 +162,16 @@ void main() {
   vec2 cuv = ((uColourXf.yz + vUv * uColourXf.x) * 255.0 + 0.5) / 256.0;
   vec3 albedo = texture(uColour, cuv, vMorph * uColourBias).rgb;
 
+  float detail = uDustReady * (1.0 - smoothstep(500.0, 3500.0, length(vRel)));
+  if (detail > 0.0) {
+    vec3 pos = uDustOrigin + vRel;
+    vec3 w = pow(abs(up), vec3(6.0));
+    w /= dot(w, vec3(1.0));
+    vec3 x = grainPlane(pos.yz), y = grainPlane(pos.zx), z = grainPlane(pos.xy);
+    vec3 bump = w.x * vec3(0.0, x.xy) + w.y * vec3(y.y, 0.0, y.x) + w.z * vec3(z.xy, 0.0);
+    n = normalize(n + detail * (bump - up * dot(up, bump)));
+    albedo *= mix(1.0, dot(w, vec3(x.z, y.z, z.z)), detail);
+  }
   vec3 V = normalize(-vRel);
   float mu0 = max(dot(n, uLight), 0.0);
   float mu = max(dot(n, V), 0.0);

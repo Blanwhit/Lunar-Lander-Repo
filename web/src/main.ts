@@ -4,6 +4,7 @@ import {
   Camera,
   Euler,
   GLSL3,
+  MathUtils,
   Matrix3,
   Matrix4,
   Mesh,
@@ -17,7 +18,9 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import type { OrbitalRocks } from './terrain/orbitalRocks';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+import { pickLandingInVR, type GlobeHeadset } from './globePicker';
 import { GlobeControls } from './controls';
 import { HelmetAudio } from './helmetAudio';
 import { landingFlight, type LandingFrame } from './landingFlight';
@@ -25,6 +28,7 @@ import { Compass } from './compass';
 import { Ephemeris } from './ephemeris';
 import { R_MOON, H_MAX_GLOBAL, H_MIN_GLOBAL, latLonToDir } from './geom';
 import { Hud } from './hud';
+import { VrFeasibility } from './overlay/vrFeasibility';
 import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
 import type { SiteReport } from './api/siteApi';
@@ -63,15 +67,21 @@ async function main() {
   renderer.sortObjects = true;
 
   const base = import.meta.env.BASE_URL + 'tiles/';
-  const meta: TileMeta = await fetch(base + 'meta.json').then((r) => r.json());
+  const [meta, coverage] = await Promise.all([
+    fetch(base + 'meta.json').then(r => r.json() as Promise<TileMeta>),
+    fetch(import.meta.env.BASE_URL + 'orbital/status.json', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+  const fullCoverage = Number.isInteger(coverage?.maxLevel) && Number.isInteger(coverage?.colourMaxLevel);
+  const terrainUrl = fullCoverage ? import.meta.env.BASE_URL + 'orbital/' : base;
 
   const ktx2 = new KTX2Loader().setTranscoderPath(import.meta.env.BASE_URL + 'basis/').detectSupport(renderer);
 
   const tree = new TileTree(
     {
-      baseUrl: base,
-      colourMaxLevel: meta.colourMaxLevel,
-      maxLevel: meta.maxLevel,
+      baseUrl: terrainUrl,
+      colourMaxLevel: fullCoverage ? coverage.colourMaxLevel : meta.colourMaxLevel,
+      maxLevel: fullCoverage ? coverage.maxLevel : meta.maxLevel,
       pixelsPerTexel: 1.25,
       gpuBudgetBytes: 384 * 1024 * 1024,
       maxInflightHeights: 12,
@@ -121,6 +131,7 @@ async function main() {
     if (on) overlayTime(simMs, true);
     needsRender = true;
   };
+  const vrScores = overlay ? new VrFeasibility(overlay, () => hud.setFeasibility(!overlay.enabled, true)) : undefined;
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
 
   // ---- right-click site inspector: pan the spot to the centre, popup with its score
@@ -209,7 +220,7 @@ async function main() {
     /** true: start the landing; false: discard the prepared walk */
     go: (start: boolean) => void;
     /** resolves (after go(true)) with the walk's per-frame approach renderer */
-    prepared: Promise<(entry: LandingFrame) => void>;
+    prepared: Promise<((entry: LandingFrame) => void) | null>;
     hooks: { onArrived: () => void; onExit: () => void };
   }
   let prep: WalkPrep | null = null;
@@ -248,12 +259,12 @@ async function main() {
     quietWaiters = [];
     for (const resolve of waiting) resolve();
   }
-  function prepareWalk(lat: number, lon: number): WalkPrep {
+  function prepareWalk(lat: number, lon: number, headset?: GlobeHeadset): WalkPrep {
     let go!: (start: boolean) => void;
     const start = new Promise<boolean>((resolve) => { go = resolve; });
-    let ready!: (draw: (entry: LandingFrame) => void) => void;
+    let ready!: (draw: ((entry: LandingFrame) => void) | null) => void;
     let fail!: (error: unknown) => void;
-    const prepared = new Promise<(entry: LandingFrame) => void>((resolve, reject) => { ready = resolve; fail = reject; });
+    const prepared = new Promise<((entry: LandingFrame) => void) | null>((resolve, reject) => { ready = resolve; fail = reject; });
     prepared.catch(() => {}); // a discarded preparation is never awaited
     const p: WalkPrep = { lat, lon, ms: simMs, audio: new HelmetAudio(), failed: false, go, prepared,
       hooks: { onArrived: () => {}, onExit: () => {} } };
@@ -262,16 +273,19 @@ async function main() {
     void (async () => {
       // behind the popup this resolves at once (the fly-to has settled); for a walk only started by
       // the Enter VR click it waits for the flight's pre-fade hold, so the descent stays smooth
-      await whenQuiet();
+      if (!headset) await whenQuiet();
       const [{ loadWalkTerrain }, walk] = await Promise.all([import('./walkTerrain'), import('./walk')]);
       void walk.prefetchWalk().catch(() => {});
       const walkSite = await siteAt(lat, lon, loadWalkTerrain(lat, lon));
       surfaceStars = walkSite.sky;
       await walk.startWalk(document.body, {
-        ...walkSite, audio: p.audio, start, quiet: whenQuiet,
+        ...walkSite, audio: p.audio, headset, vrScores, start, quiet: headset ? undefined : whenQuiet,
         siteAt: (la: number, lo: number) => siteAt(la, lo, loadWalkTerrain(la, lo)),
         onPrepared: ready,
-        onArrived: () => p.hooks.onArrived(),
+        onArrived: () => {
+          p.hooks.onArrived();
+          if (headset) ready(null); // The picker has handed its running XR session to the walk.
+        },
         onExit: () => p.hooks.onExit(),
       });
     })().catch((error) => { p.failed = true; fail(error); });
@@ -427,6 +441,29 @@ async function main() {
   let drawApproach: ((entry: LandingFrame) => void) | undefined;
   let surfaceStars: Texture | undefined;
 
+  let rocks: OrbitalRocks | undefined;
+  let nextDetailLoad = 0;
+  function loadSurfaceDetail() {
+    if (performance.now() < nextDetailLoad) return;
+    nextDetailLoad = Infinity;
+    const retry = (error: unknown) => {
+      console.warn('Orbital surface detail', error);
+      nextDetailLoad = performance.now() + 15000;
+    };
+    if (!tree.grainMaps) void import('./lunarSoil').then(m => m.loadGrainMaps()).then(maps => {
+      tree.grainMaps = maps;
+      needsRender = true;
+    }).catch(retry);
+    if (!rocks) void Promise.all([
+      import('./terrain/orbitalRocks'),
+      import('./lunarRocks').then(m => m.loadRockSamples()),
+      import('./rockAtlas').then(m => m.loadRockAtlas()),
+    ]).then(([{ OrbitalRocks }, samples, atlas]) => {
+      rocks = new OrbitalRocks(atlas, samples);
+      needsRender = true;
+    }).catch(retry);
+  }
+
   let needsRender = true;
   tree.onChange = () => (needsRender = true);
 
@@ -561,6 +598,14 @@ async function main() {
     const dPivot = Math.hypot(st.camPos[0] - pv[0], st.camPos[1] - pv[1], st.camPos[2] - pv[2]);
     hud.setScale((dPivot * 2 * Math.tan(fov / 2)) / lodH);
     for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
+    if (dPivot < 6500 && !flightFrame) {
+      loadSurfaceDetail();
+      if (rocks && !overlay?.enabled) {
+        dummyCam.projectionMatrix.copy(proj);
+        rocks.update(tiles, fi, LIGHT, LIGHT_PARAMS, alt, aspect);
+        scene.add(rocks.group);
+      }
+    }
     if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
     renderer.render(scene, dummyCam);
@@ -590,15 +635,46 @@ async function main() {
     if (!site || landingBusy) return;
     void enterVR(site.lat, site.lon);
   };
-  function enterVR(lat: number, lon: number) {
+  const pickerButton = document.createElement('button');
+  pickerButton.type = 'button';
+  pickerButton.className = 'moon-feas';
+  pickerButton.textContent = 'Choose landing in VR';
+  if (navigator.xr) {
+    const updatePicker = async () => {
+      try {
+        if (await navigator.xr!.isSessionSupported('immersive-vr')) {
+          hud.root.querySelector('.moon-centre')?.append(pickerButton);
+        } else pickerButton.remove();
+      } catch { pickerButton.remove(); }
+    };
+    void updatePicker();
+    navigator.xr.addEventListener('devicechange', updatePicker);
+    pickerButton.onclick = async () => {
+      if (landingBusy || pickerButton.disabled) return;
+      pickerButton.disabled = true;
+      let session: XRSession | undefined;
+      try {
+        session = await navigator.xr!.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
+        const direction = controls.tgt;
+        await pickLandingInVR(session, Math.asin(MathUtils.clamp(direction.z, -1, 1)) / DEG,
+          Math.atan2(direction.y, direction.x) / DEG, enterVR, vrScores);
+        pickerButton.textContent = 'Choose landing in VR';
+      } catch (error) {
+        await session?.end().catch(() => {});
+        pickerButton.textContent = 'Try VR landing again';
+        console.warn('VR landing picker', error);
+      } finally { pickerButton.disabled = false; }
+    };
+  }
+  async function enterVR(lat: number, lon: number, headset?: GlobeHeadset) {
     landingBusy = true;
     clearTimeout(prefetchTimer);
     prefetchTimer = 0;
     // the walk prepared behind the popup, if it is for this spot and time; otherwise a new one
-    let p = prep && prep.lat === lat && prep.lon === lon && prep.ms === simMs && !prep.failed ? prep : null;
+    let p = !headset && prep && prep.lat === lat && prep.lon === lon && prep.ms === simMs && !prep.failed ? prep : null;
     if (!p) {
       prep?.go(false);
-      p = prepareWalk(lat, lon);
+      p = prepareWalk(lat, lon, headset);
     }
     prep = null; // taken: closing the popup must not discard it
     const walk = p;
@@ -662,10 +738,14 @@ async function main() {
       flightFrame = undefined;
       walking = true;
     };
-    walk.prepared.then(
-      (draw) => { drawApproach = draw; ready = true; flightHolding = false; },
-      (error) => { console.error('Landing failed', error); restore(); },
-    );
+    try {
+      const draw = await walk.prepared;
+      if (draw) { drawApproach = draw; ready = true; flightHolding = false; }
+    } catch (error) {
+      console.error('Landing failed', error);
+      restore();
+      if (headset) throw error;
+    }
   }
   requestAnimationFrame(render);
   // debug/measurement hook (no UI): step(dt) renders one frame even when rAF is paused
@@ -673,7 +753,7 @@ async function main() {
   // site API (lazy-loaded): (await __moon.siteApi()).query({ lat, lon, time })
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
-    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL })));
+    (siteApi ??= import('./api/siteApi').then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl })));
 }
 
 /** optional deep link: #lat,lon,dist_m[,heading_deg[,tilt_deg[,ISO-8601 UTC time]]] */

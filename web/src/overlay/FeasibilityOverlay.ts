@@ -1,7 +1,7 @@
 // Feasibility heatmap overlay: a quadtree of score tiles (pipeline/feasibility_grid.py),
 // evaluated for the viewer's date/time in Web Workers and handed to the terrain shader as
 // small R8 textures (score 0..100 % -> 0..255), sampled with a UV transform like colour.
-import { DataTexture, LinearFilter, RedFormat, UnsignedByteType, ClampToEdgeWrapping, Matrix3, Vector3, type Texture } from 'three';
+import { DataTexture, LinearFilter, RedFormat, UnsignedByteType, ClampToEdgeWrapping, Matrix3, Vector3 } from 'three';
 import type { Ephemeris } from '../ephemeris';
 import type { OrientationProvider } from '../orientation';
 import { BACK_STEPS, FWD_STEPS, STEP_H, type FeasMsg, type FeasReply } from './feasWorker';
@@ -25,7 +25,7 @@ interface Node {
 }
 
 export interface FeasLookup {
-  tex: Texture;
+  tex: DataTexture;
   scale: number;
   ou: number;
   ov: number;
@@ -39,6 +39,7 @@ export class FeasibilityOverlay {
   private busy: number[] = [];
   private token = 0;
   private timelineReady = false;
+  private timelineMs = NaN;
   private frame = 0;
   private wantLoad = new Set<Node>();
   private wantCompute = new Set<Node>();
@@ -46,7 +47,7 @@ export class FeasibilityOverlay {
 
   constructor(
     private baseUrl: string, // .../tiles/
-    private meta: FeasMeta,
+    readonly meta: FeasMeta,
     private ephem: Ephemeris,
     private orientation: OrientationProvider,
   ) {
@@ -77,7 +78,9 @@ export class FeasibilityOverlay {
   // ------------------------------------------------------------------- time
   /** recompute for a new date/time (UTC ms): builds the shared Sun/Earth timeline */
   async setTime(ms: number) {
+    if (this.timelineReady && this.timelineMs === ms) return;
     const token = ++this.token;
+    this.timelineReady = false;
     const N = 1 + FWD_STEPS + BACK_STEPS;
     const sun = new Float64Array(N * 3), earth = new Float64Array(N * 3);
     const tm = new Matrix3(), v = new Vector3();
@@ -94,6 +97,7 @@ export class FeasibilityOverlay {
     }
     this.ensureWorkers();
     for (const w of this.workers) w.postMessage({ type: 'timeline', token, sun, earth } satisfies FeasMsg);
+    this.timelineMs = ms;
     this.timelineReady = true;
     // every loaded tile is now stale; recompute those in use first
     for (const n of this.nodes.values()) if (n.state === 2) this.wantCompute.add(n);
@@ -102,7 +106,7 @@ export class FeasibilityOverlay {
 
   // ------------------------------------------------------------------- lookup
   /** score texture + UV transform for a terrain tile (deepest score tile available) */
-  lookup(L: number, f: number, x: number, y: number): FeasLookup | null {
+  lookup(L: number, f: number, x: number, y: number, currentOnly = false): FeasLookup | null {
     if (!this.enabled) return null;
     this.ensureWorkers();
     const target = Math.min(L, this.meta.maxLevel);
@@ -112,11 +116,12 @@ export class FeasibilityOverlay {
       n.lastUsed = this.frame;
       if (n.state === 0) this.wantLoad.add(n);
       if (n.state === 2 && n.texToken !== this.token && !n.computing) this.wantCompute.add(n);
-      if (n.tex) best = n;
+      if (n.tex && (!currentOnly || n.texToken === this.token)) best = n;
       if (n.state !== 2 || n.L >= target || !n.childMask) break;
       const s: number = L - n.L - 1; // (x, y) are terrain-tile coordinates at level L
       const cx: number = (x >> s) & 1, cy: number = (y >> s) & 1;
       const idx: number = (cy << 1) | cx;
+      if (!(n.childMask & (1 << idx))) break;
       const parent: Node = n;
       n = parent.children[idx] ??= this.node(parent.L + 1, f, parent.x * 2 + cx, parent.y * 2 + cy);
     }
@@ -126,6 +131,8 @@ export class FeasibilityOverlay {
     const m = (1 << k) - 1;
     return { tex: best.tex!, scale, ou: (x & m) * scale, ov: (y & m) * scale };
   }
+
+  unavailable(face: number) { return this.roots[face].state === 3; }
 
   /** call once per rendered frame (after the terrain meshes were built) */
   endFrame() {

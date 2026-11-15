@@ -11,6 +11,9 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
+import { VrHudButton, VrHudPointers } from './overlay/vrHudButton';
+import type { VrFeasibility } from './overlay/vrFeasibility';
+import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
 import { HandSamples } from './handSamples';
 import { WristNavigator } from './wristNavigator';
@@ -37,6 +40,8 @@ interface WalkSite {
   earth?: { direction: Vector3; angularRadius: number; sunDirection: Vector3; gmst: number; texture?: Texture };
 }
 export interface WalkOptions extends WalkSite {
+  headset?: GlobeHeadset;
+  vrScores?: VrFeasibility;
   audio: HelmetAudio;
   siteAt:(lat:number,lon:number)=>Promise<WalkSite>;
   onPrepared: (draw: (entry: LandingFrame) => void) => void;
@@ -192,8 +197,8 @@ export function prefetchWalk() {
 
 /** Open an eye-level desktop preview. Headset permission is requested by Enter headset. */
 export async function startWalk(container: HTMLElement, options: WalkOptions): Promise<void> {
-  const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+  const renderer = options.headset?.renderer ?? new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  if (!options.headset) renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
   renderer.xr.enabled = true;
   renderer.xr.setFoveation(0);
   const camera = new PerspectiveCamera(70, 1, 0.10, WALK_FAR);
@@ -251,8 +256,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     sky.geometry.dispose();
     sky.material.dispose();
     glare.dispose();
-    renderer.dispose();
-    renderer.forceContextLoss();
+    if (!options.headset) { renderer.dispose(); renderer.forceContextLoss(); }
     throw err;
   }
   const rockAtlas = await loadRockAtlas();
@@ -275,9 +279,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const canvas = renderer.domElement;
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-label', 'Lunar surface, first-person view');
+  const scores = options.vrScores;
+  const scoreButton = scores && VrHudButton.feasibility(scores, -.235);
+  const pointers = new VrHudPointers();
+  const globeButton = new VrHudButton('Return to globe', requestGlobe, scores ? .235 : 0);
+  rig.add(globeButton.mesh);
+  if (scoreButton) rig.add(scoreButton.mesh);
   const bar = document.createElement('div');
   bar.className = 'walk-bar';
-  bar.innerHTML = `<div class="walk-actions"><button type="button" class="walk-enter">Enter headset</button><button type="button" class="walk-touch">Hold to walk</button><button type="button" class="walk-exit">Exit VR</button></div><p class="walk-help walk-position"></p><p class="walk-help walk-controls"></p><p class="walk-status" role="status"></p>`;
+  bar.innerHTML = `<div class="walk-actions"><button type="button" class="walk-enter">Enter headset</button><button type="button" class="walk-touch">Hold to walk</button><button type="button" class="walk-exit">Return to globe</button></div><p class="walk-help walk-position"></p><p class="walk-help walk-controls"></p><p class="walk-status" role="status"></p>`;
   overlay.append(style, canvas, bar);
   overlay.style.opacity = '0';
   overlay.inert = true;
@@ -297,6 +307,19 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   help.textContent = desktopControls+' Click or tap terrain to travel there.';
   const abort = new AbortController();
   const listener = { signal: abort.signal };
+  const screenToggle = document.createElement('button');
+  const syncScreenToggle = () => {
+    if (!scores) return;
+    const enabled = scores.overlay.enabled;
+    screenToggle.textContent = 'Feasibility ' + (enabled ? 'on' : 'off');
+    screenToggle.setAttribute('aria-pressed', String(enabled));
+    lastLocationTime = -Infinity;
+  };
+  if (scores) {
+    screenToggle.type = 'button';
+    exit.before(screenToggle);
+    screenToggle.addEventListener('click', () => { scores.toggle(); syncScreenToggle(); }, listener);
+  }
   let activeSession: XRSession | null = null;
   let pendingSession = false;
   let arriving = true;
@@ -321,7 +344,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let supportCheck = 0;
   let shadowX = Infinity, shadowZ = Infinity;
 
-  let jumpHeld = false;
   const gripPoints = [new Vector3(),new Vector3()];
   const grips: (Vector3 | undefined)[] = [undefined,undefined];
   const gripRotations = [new Quaternion(), new Quaternion()];
@@ -344,16 +366,20 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (!boot.onStone) prints.press(boot,scale,contactDt,dust);
   }
 
-  let anchorX=0,anchorZ=0,relocating=false,refreshing=false;
+  let anchorX=0,anchorZ=0,relocating=false;
+  let refreshing: Promise<void> | undefined;
+  let choosingLanding = false;
+  let returnArmed: XRInputSource | undefined;
   let queuedHit:Vector3|undefined;
   let lastLocationTime=-Infinity;
+  syncScreenToggle();
   const regions: {origin:SurfaceLocation; frame:Matrix4; trail:ReturnType<WalkFootprints['takeTrail']>}[]=[];
   const latLon=(p:SurfaceLocation) => `${Math.abs(p.lat).toFixed(5)}°${p.lat<0?'S':'N'}  ${Math.abs(p.lon).toFixed(5)}°${p.lon<0?'W':'E'}`;
   const formatPosition=(p:SurfaceLocation) => `${latLon(p)} · ${Math.round(p.elevation).toLocaleString()} m elevation · ~${Math.round(p.resolution).toLocaleString()} m grid`;
-  function localPoint(frame:Matrix4,point:SurfaceLocation) {
+  function localPoint(frame:Matrix4,point:{lat:number;lon:number;elevation?:number}) {
     const dir=new Vector3(...latLonToDir(point.lat,point.lon)).applyMatrix4(frame.clone().transpose());
     if(dir.y<=0)return;
-    return new Vector2((R_MOON+point.elevation)*dir.x,(R_MOON+point.elevation)*dir.z);
+    return new Vector2((R_MOON+(point.elevation ?? 0))*dir.x,(R_MOON+(point.elevation ?? 0))*dir.z);
   }
   function updateLighting(at:WalkSite) {
     sky.removeFromParent();sky.geometry.dispose();sky.material.dispose();
@@ -362,26 +388,36 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     applySunlight();
     shadowX=shadowZ=Infinity;
   }
-  async function travelTo(hit:Vector3) {
-    if(relocating || closed)return;
-    if(refreshing){queuedHit=hit;return;}
+  async function travelTo(hit:Vector3 | {lat:number; lon:number}, session?:XRSession) {
+    if (relocating || closed) return false;
+    const cancelled = () => closed || (!!session && activeSession !== session);
+    if (refreshing) {
+      if (hit instanceof Vector3) { queuedHit=hit; return false; }
+      await refreshing;
+      if (cancelled()) return false;
+    }
     relocating=true;
-    const destination=site.height.coordinates(hit.x,hit.z);
-    status.textContent='Preparing terrain at '+formatPosition(destination);
+    const destination = hit instanceof Vector3 ? site.height.coordinates(hit.x,hit.z) : hit;
+    status.textContent='Preparing terrain';
     resetControls();
-    let x=hit.x,z=hit.z;
+    const local = hit instanceof Vector3 ? new Vector2(hit.x,hit.z) : localPoint(site.landingToBody, destination);
+    let x=local?.x ?? 0,z=local?.y ?? 0;
     try {
-      if(Math.hypot(x,z)>3500) {
+      if(!local || local.length()>3500) {
         // Re-establish true local vertical on long journeys. Restore regolith if this is a return visit.
         const prior=regions.find(r=>{const v=localPoint(r.frame,destination);return v && v.length()<3000;});
         const origin=prior?.origin ?? destination;
         const next=await options.siteAt(origin.lat,origin.lon);
-        if(closed)return;
-        const coord=prior ? localPoint(next.landingToBody,destination)! : new Vector2();
+        if(cancelled())return false;
+        let coord=prior ? localPoint(next.landingToBody,destination)! : new Vector2();
+        if(prior) {
+          await next.height.prepare(coord.x,coord.y);
+          const { elevation } = next.height.coordinates(coord.x,coord.y);
+          coord = localPoint(next.landingToBody, { ...destination, elevation })!;
+        }
         x=coord.x;z=coord.y;
-        if(prior)await next.height.prepare(x,z);
         const newGround=await groundFor(next,x,z);
-        if(closed){newGround.dispose();return;}
+        if(cancelled()){newGround.dispose();return false;}
         const trail=prints.takeTrail();
         regions.push({origin:site.height.coordinates(0,0),frame:site.landingToBody,trail});
         // Transport the viewing direction between the two east/north frames.
@@ -398,10 +434,15 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         anchorX=x;anchorZ=z;
       } else {
         const improved=await site.height.prepare(x,z);
-        if(closed)return;
+        if(cancelled())return false;
+        if (!(hit instanceof Vector3)) {
+          const { elevation } = site.height.coordinates(x,z);
+          const exact = localPoint(site.landingToBody, { ...destination, elevation })!;
+          x=exact.x;z=exact.y;
+        }
         if(improved || Math.hypot(x-anchorX,z-anchorZ)>80) {
           await ground.prepareLanding(x,z,improved);
-          if(closed)return;
+          if(cancelled())return false;
           prints.rebuildSurface();anchorX=x;anchorZ=z;
         }
       }
@@ -410,9 +451,11 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       if(!activeSession)resetDesktop();
       suit.resetFeet();gait.reset();lastLocationTime=-Infinity;
       status.textContent='';
+      return true;
     } catch(error) {
       console.error('Surface travel failed',error);
       if(!closed)status.textContent='Terrain could not load. Try selecting the location again.';
+      return false;
     } finally {relocating=false;}
   }
 
@@ -427,9 +470,12 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   }
   function resetControls() {
+    returnArmed = undefined;
+    scoreButton?.hide();
+    globeButton.hide();
     keys.clear();
     gait.reset();
-    jumpHeld = false;
+    pointers.reset();
     wrist.hide();
     turning.reset();
     suit.resetFeet();
@@ -528,7 +574,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     if (closed || check !== supportCheck || pendingSession || activeSession) return;
     enter.disabled = !supported;
     if (supported) {
-      status.textContent = 'Quest 2 · Left stick moves, left grip runs, right stick turns, A jumps and right trigger sprints. Right grip holds a loose rock. Hold B to aim, release to mark. Raise your left wrist to read it.';
+      status.textContent = 'Quest 2 · Left stick moves, left grip runs, right stick turns, A jumps and right trigger sprints. Right grip holds a loose rock. Hold B to aim, release to mark. Raise your left wrist to read it. Press Y to return to the globe.';
     } else {
       showHeadsetHint();
     }
@@ -540,7 +586,9 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     samples.release(); pads.fill(undefined);
     resetControls();
     if (closed) return;
+    if (choosingLanding) renderer.setAnimationLoop(walkFrame);
     enter.textContent = 'Enter headset';
+    syncScreenToggle();
     help.textContent = desktopControls+' Click or tap terrain to travel there.';
     resetDesktop();
     void checkSupport();
@@ -586,7 +634,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       enter.textContent = 'Exit headset';
       visibilityChanged();
       status.textContent = '';
-      help.textContent = 'Left stick moves. Hold left grip to run. A jumps. Right stick turns. Hold the right trigger to sprint. Right grip picks up a rock within reach. Hold B and release to mark a ridge. Raise your left wrist to check it.';
+      help.textContent = 'Left stick moves. Hold left grip to run. A jumps. Right stick turns. Hold the right trigger to sprint. Right grip picks up a rock within reach. Hold B and release to mark a ridge. Raise your left wrist to check it. Press Y to return to the globe.';
     } catch (error) {
       await session?.end().catch(() => {});
       if (!closed) {
@@ -614,6 +662,8 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     sky.material.dispose();
     glare.dispose();
     sunlight.dispose();
+    scoreButton?.dispose();
+    globeButton.dispose();
     samples.dispose(); wrist.dispose();
     suit.dispose();
     prints.dispose();
@@ -626,9 +676,30 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   renderer.xr.addEventListener('sessionend', sessionEnded);
   navigator.xr?.addEventListener('devicechange', checkSupport, listener);
-  exit.addEventListener('click', () => void leave(), listener);
+  exit.addEventListener('click', () => { if (activeSession) requestGlobe(); else void leave(); }, listener);
   enter.addEventListener('click', toggleXR, listener);
   resetDesktop();
+  // The globe picker keeps drawing while the surface loads. Take over its session
+  // and frame loop together so the wearer arrives without a second permission prompt.
+  const headset = options.headset;
+  if (headset && renderer.xr.getSession() === headset.session && renderer.xr.isPresenting) {
+    engaged = true;
+    overlay.style.pointerEvents = '';
+    activeSession = headset.session;
+    activeSession.addEventListener('visibilitychange', visibilityChanged);
+    floorOffset = headset.reference === 'local-floor' ? 0 : eyeHeight;
+    trackingOriginPending = true;
+    enter.textContent = 'Exit headset';
+    enter.disabled = false;
+    overlay.style.opacity = '1';
+    overlay.inert = false;
+    bar.hidden = false;
+    arriving = false;
+    options.onArrived();
+    visibilityChanged();
+    renderer.setAnimationLoop(walkFrame);
+    return;
+  }
   // Upload the walking scene behind the globe before starting the dissolve.
   // (textures, programs and buffers in separate tasks, so the flight keeps animating)
   // each long step in its own task, and only while nothing animates (options.quiet)
@@ -670,6 +741,31 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   });
 
+  function requestGlobe() {
+    if (activeSession && !choosingLanding && !relocating && !closed) {
+      void returnToGlobe(activeSession).catch(error => console.warn('VR globe unavailable', error));
+    }
+  }
+
+  async function returnToGlobe(session: XRSession) {
+    choosingLanding = true;
+    queuedHit = undefined;
+    suspendTools();
+    const location = site.height.coordinates(targetX,targetZ);
+    try {
+      await showLandingGlobe(renderer, session, location.lat, location.lon,
+        (lat, lon) => travelTo({lat, lon}, session), options.vrScores);
+    } finally {
+      choosingLanding = false;
+      if (!closed) {
+        prevTime = 0;
+        trackingOriginPending = !!activeSession;
+        visibilityChanged();
+        renderer.setAnimationLoop(walkFrame);
+      }
+    }
+  }
+
   function walkFrame(time:number, frame?:XRFrame) {
     if (closed) return;
     const dt = prevTime ? MathUtils.clamp((time - prevTime) / 1000, 0, 0.1) : 0;
@@ -677,16 +773,24 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     stick.set(0, 0);
     let turn = 0, trackedHeight = eyeHeight;
     let running = keys.has('ShiftLeft') || keys.has('ShiftRight');
-    let jumpDown = false, sprint = 0, grab = false, mark = false, gotRay = false;
+    let sprint = 0, grab = false, mark = false, gotRay = false;
     pads.fill(undefined);
     grips.fill(undefined);
     if (frame && activeSession) {
       const space = renderer.xr.getReferenceSpace();
       const pose = space && frame.getViewerPose(space);
       if (!pose || activeSession.visibilityState !== 'visible') {
+        returnArmed = undefined;
+        pointers.reset();
+        scoreButton?.hide();
+        globeButton.hide();
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
+      pointers.update(activeSession, frame, space!);
+      scoreButton?.update(pose, pointers);
+      globeButton.update(pose, pointers);
+      if (choosingLanding) return;
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
@@ -707,14 +811,18 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         if (input.handedness !== 'none') pads[input.handedness === 'right' ? 1 : 0] = pad ?? undefined;
         if (pad?.mapping === 'xr-standard') {
           if (input.handedness === 'right') {
-            jumpDown = !!pad.buttons[4]?.pressed;
             mark = !!pad.buttons[5]?.pressed;
             grab = !!pad.buttons[1]?.pressed;
-            const trigger = pad.buttons[0];
-            const pressure = trigger?.value ?? (trigger?.pressed ? 1 : 0);
-            sprint = Math.max(0, (pressure - .12) / .88);
+            if (!pointers.right.triggerCaptured) sprint = Math.max(0, (pointers.right.triggerPressure - .12) / .88);
           }
-          if (input.handedness === 'left') running = !!pad.buttons[1]?.pressed;
+          if (input.handedness === 'left') {
+            running = !!pad.buttons[1]?.pressed;
+            if (!pad.buttons[5]?.pressed) returnArmed = input;
+            else if (returnArmed === input && !choosingLanding && !relocating) {
+              requestGlobe();
+              return;
+            }
+          }
         }
         const gripPose = input.gripSpace && space && frame.getPose(input.gripSpace, space);
         if (gripPose && input.handedness !== 'none') {
@@ -737,8 +845,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         else stick.set(deadzone(axes[offset]), -deadzone(axes[offset + 1]));
       }
       if (sprint > 0 && stick.lengthSq() === 0) stick.y = 1;
-      if (jumpDown && !jumpHeld) gait.requestJump();
-      jumpHeld = jumpDown;
+      if (pointers.right.faceClick && !pointers.right.overButton) gait.requestJump();
       const radians = turning.advance(deadzone(turn), dt);
       if (radians) {
         // Rotate about the wearer's current position, including physical travel from the origin.
@@ -799,7 +906,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       }
       samples.hand(ground,grips[1],gripRotations[1],grab,dt);
       wrist.aim(mark,gotRay ? aimRay : undefined,eye,ground,site.height,targetX,targetZ,time);
-      wrist.wrist(grips[0],gripRotations[0],eye,gaze,site.height,targetX,targetZ,samples.inspection,time);
+      wrist.wrist(grips[0],gripRotations[0],eye,gaze,site.height,targetX,targetZ,samples.inspection,time,options.vrScores);
     }
     samples.advance(ground,dt,sampleBed);
     audio.update(Math.hypot(travelX,travelZ)/Math.max(.001,dt),dt);
@@ -816,22 +923,22 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
     if(time-lastLocationTime>300) {
       const position = site.height.coordinates(targetX,targetZ);
-      positionLabel.textContent = formatPosition(position) + ' · ' + describeRocks(rockAtlas.read(position.lat, position.lon));
+      positionLabel.textContent = formatPosition(position) + ' · ' + describeRocks(rockAtlas.read(position.lat, position.lon))
+        + (!activeSession && scores?.overlay.enabled ? ' · ' + scores.reading(latLonToDir(position.lat,position.lon)) : '');
       lastLocationTime=time;
     }
     if(!relocating && !refreshing && Math.hypot(targetX-anchorX,targetZ-anchorZ)>160) {
       if(Math.hypot(targetX,targetZ)>3500)void travelTo(new Vector3(targetX,0,targetZ));
       else {
-        refreshing=true;
         const x=targetX,z=targetZ;
-        void (async()=>{
+        refreshing=(async()=>{
           try {
             const improved=await site.height.prepare(x,z);
             if(closed)return;
             await ground.prepareLanding(x,z,improved);
             if(!closed){prints.rebuildSurface();anchorX=x;anchorZ=z;shadowX=Infinity;}
           } finally {
-            refreshing=false;
+            refreshing=undefined;
             if(queuedHit){const hit=queuedHit;queuedHit=undefined;void travelTo(hit);}
           }
         })().catch(error=>console.warn('Could not refine walk terrain',error));
