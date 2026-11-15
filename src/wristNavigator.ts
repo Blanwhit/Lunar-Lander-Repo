@@ -1,6 +1,7 @@
 import { CanvasTexture, Group, Mesh, MeshBasicMaterial, PlaneGeometry, Quaternion, Ray,
   RingGeometry, SRGBColorSpace, Vector3 } from 'three';
-import { R_MOON } from './geom';
+import type { VrFeasibility } from './overlay/vrFeasibility';
+import { latLonToDir, R_MOON } from './geom';
 import type { SurfaceLocation, WalkTerrain } from './walkTerrain';
 import type { WalkGround } from './walkGround';
 import type { SpecimenInfo } from './specimenInfo';
@@ -31,9 +32,9 @@ export class WristNavigator {
   private readonly v = new Vector3();
 
   constructor() {
-    this.canvas.width=640; this.canvas.height=400;
+    this.canvas.width=640; this.canvas.height=456;
     this.texture=new CanvasTexture(this.canvas); this.texture.colorSpace=SRGBColorSpace;
-    this.panel=new Mesh(new PlaneGeometry(.168,.105),new MeshBasicMaterial({map:this.texture,toneMapped:false}));
+    this.panel=new Mesh(new PlaneGeometry(.168,.120),new MeshBasicMaterial({map:this.texture,toneMapped:false}));
     this.group.add(this.panel,this.ring); this.hide();
   }
 
@@ -61,7 +62,7 @@ export class WristNavigator {
   }
 
   wrist(hand: Vector3 | undefined, rotation: Quaternion, eye: Vector3, view: Vector3,
-    terrain: WalkTerrain, x: number, z: number, sample: SpecimenInfo | undefined, time: number) {
+    terrain: WalkTerrain, x: number, z: number, sample: SpecimenInfo | undefined, time: number, scores?: VrFeasibility) {
     this.panel.visible=!!hand && hand.y>eye.y-.48 && hand.y<eye.y+.23 &&
       hand.distanceToSquared(eye)<.9**2 && this.v.subVectors(hand,eye).normalize().dot(view)>.5;
     if (!this.panel.visible || !hand) { this.nextDisplay=0; return; }
@@ -70,8 +71,8 @@ export class WristNavigator {
     if (time<this.nextDisplay) return;
     this.nextDisplay=time+160;
     const c=this.canvas.getContext('2d')!;
-    c.fillStyle='#152125'; c.fillRect(0,0,640,400);
-    c.strokeStyle='#71827e'; c.lineWidth=6; c.strokeRect(3,3,634,394);
+    c.fillStyle='#152125'; c.fillRect(0,0,640,456);
+    c.strokeStyle='#71827e'; c.lineWidth=6; c.strokeRect(3,3,634,450);
     const line=(str:string,y:number,size:number,color='#edf4ec')=>{
       c.fillStyle=color;c.font='500 '+size+'px system-ui, sans-serif';c.fillText(str,24,y,592);
     };
@@ -105,6 +106,14 @@ export class WristNavigator {
       line('FIELD SAMPLES',249,30,'#c7daa0');
       line('Reach for a loose rock.',304,35);
       line('Squeeze the right grip to inspect.',358,33);
+    }
+    if (scores) {
+      c.fillStyle='#53635f'; c.fillRect(24,386,592,2);
+      if (scores.overlay.enabled) {
+        const here=terrain.coordinates(x,z);
+        line(scores.reading(latLonToDir(here.lat,here.lon)),430,33,'#edf4ec');
+        c.textAlign='right'; c.font='500 24px system-ui'; c.fillText('Left trigger · Hide',616,430); c.textAlign='left';
+      } else line('Left trigger · Show feasibility',430,29,'#c7daa0');
     }
     this.texture.needsUpdate=true;
   }

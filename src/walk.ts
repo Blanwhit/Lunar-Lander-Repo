@@ -11,6 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
+import type { VrFeasibility } from './overlay/vrFeasibility';
 import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
 import { HandSamples } from './handSamples';
@@ -39,6 +40,7 @@ interface WalkSite {
 }
 export interface WalkOptions extends WalkSite {
   headset?: GlobeHeadset;
+  vrScores?: VrFeasibility;
   audio: HelmetAudio;
   siteAt:(lat:number,lon:number)=>Promise<WalkSite>;
   onPrepared: (draw: (entry: LandingFrame) => void) => void;
@@ -440,6 +442,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   function resetControls() {
     returnArmed = undefined;
+    options.vrScores?.input();
     keys.clear();
     gait.reset();
     jumpHeld = false;
@@ -698,7 +701,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     const location = site.height.coordinates(targetX,targetZ);
     try {
       await showLandingGlobe(renderer, session, location.lat, location.lon,
-        (lat, lon) => travelTo({lat, lon}, session));
+        (lat, lon) => travelTo({lat, lon}, session), options.vrScores);
     } finally {
       choosingLanding = false;
       if (!closed) {
@@ -725,9 +728,11 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       const pose = space && frame.getViewerPose(space);
       if (!pose || activeSession.visibilityState !== 'visible') {
         returnArmed = undefined;
+        options.vrScores?.input();
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
+      options.vrScores?.input(activeSession);
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
@@ -847,7 +852,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       }
       samples.hand(ground,grips[1],gripRotations[1],grab,dt);
       wrist.aim(mark,gotRay ? aimRay : undefined,eye,ground,site.height,targetX,targetZ,time);
-      wrist.wrist(grips[0],gripRotations[0],eye,gaze,site.height,targetX,targetZ,samples.inspection,time);
+      wrist.wrist(grips[0],gripRotations[0],eye,gaze,site.height,targetX,targetZ,samples.inspection,time,options.vrScores);
     }
     samples.advance(ground,dt,sampleBed);
     audio.update(Math.hypot(travelX,travelZ)/Math.max(.001,dt),dt);
