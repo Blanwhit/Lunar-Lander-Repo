@@ -28,6 +28,7 @@ import { Compass } from './compass';
 import { Ephemeris } from './ephemeris';
 import { R_MOON, H_MAX_GLOBAL, H_MIN_GLOBAL, latLonToDir } from './geom';
 import { Hud } from './hud';
+import { VrFeasibility } from './overlay/vrFeasibility';
 import { FeasibilityOverlay } from './overlay/FeasibilityOverlay';
 import { moonOrientation } from './orientation';
 import type { SiteReport } from './api/siteApi';
@@ -124,6 +125,7 @@ async function main() {
     if (on) overlayTime(simMs, true);
     needsRender = true;
   };
+  const vrScores = overlay ? new VrFeasibility(overlay, () => hud.setFeasibility(!overlay.enabled, true)) : undefined;
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
 
   // ---- right-click site inspector: pan the spot to the centre, popup with its score
@@ -546,7 +548,7 @@ async function main() {
         session = await navigator.xr!.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
         const direction = controls.tgt;
         await pickLandingInVR(session, Math.asin(MathUtils.clamp(direction.z, -1, 1)) / DEG,
-          Math.atan2(direction.y, direction.x) / DEG, enterVR);
+          Math.atan2(direction.y, direction.x) / DEG, enterVR, vrScores);
         pickerButton.textContent = 'Choose landing in VR';
       } catch (error) {
         await session?.end().catch(() => {});
@@ -644,7 +646,7 @@ async function main() {
       }
       const walkSite = await siteAt(lat, lon, selectedTerrain);
       surfaceStars = walkSite.sky;
-      await startWalk(document.body, { ...walkSite, siteAt, audio, headset, onExit: restore,
+      await startWalk(document.body, { ...walkSite, siteAt, audio, headset, vrScores, onExit: restore,
         onPrepared(draw) {
           drawApproach = draw;
           ready = true;
