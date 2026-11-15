@@ -6,6 +6,7 @@ import {
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 import { addSuitGear, type SuitGear } from './suitGear';
+import { buildGlove, gloveParts } from './suitGlove';
 import { WalkFeet, type BootPose } from './walkFeet';
 import { restSole, WalkOutsole } from './walkOutsole';
 
@@ -52,35 +53,89 @@ function fabric(source: MeshStandardMaterial): MeshPhysicalMaterial {
   });
   m.name = source.name;
   source.dispose();
-  // markings in the model's own frame (attribute bodyPos: rest position before the legs were
-  // lengthened), so the edges stay crisp at any mesh density:
+  // markings and relief in the model's own frame (attribute bodyPos: rest position before the
+  // legs were lengthened), so the edges stay crisp at any mesh density:
   //  * red commander stripes round both thighs, as on the lead EVA crew member's suit
-  //  * gloves: grey grip palms and fingers, dark rubber fingertips
+  //  * convolutes: pleated bellows rings at the knees and elbows (the suit's flexible joints)
+  //  * stitched seams down the outer and inner sides of the lower legs
+  //  * grey lunar dust worked into the boots and shins, patchy and fading up the leg
+  // The pleats and seams are a height field turned into a normal tilt (bump mapping), so they
+  // catch the low Sun without adding vertices.
   m.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', 'attribute vec3 bodyPos;\nvarying vec3 vBody;\n#include <common>')
       .replace('#include <begin_vertex>', 'vBody = bodyPos;\n#include <begin_vertex>');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', 'varying vec3 vBody;\n#include <common>')
+      .replace('#include <common>', `varying vec3 vBody;
+#include <common>
+float suitHash(vec3 p) { p = fract(p * .3183099 + .1); p *= 17.; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float suitNoise(vec3 x) {
+  vec3 i = floor(x), f = fract(x); f = f * f * (3. - 2. * f);
+  return mix(mix(mix(suitHash(i), suitHash(i + vec3(1, 0, 0)), f.x), mix(suitHash(i + vec3(0, 1, 0)), suitHash(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(suitHash(i + vec3(0, 0, 1)), suitHash(i + vec3(1, 0, 1)), f.x), mix(suitHash(i + vec3(0, 1, 1)), suitHash(i + 1.), f.x), f.y), f.z);
+}
+// bellows profile: rounded ridges, sharp creases (0 in a crease, 1 on a ridge)
+float suitPleat(float t, float period) { return sqrt(abs(sin(3.14159265 * t / period))); }
+// height field h (metres) -> perturbed normal, from screen-space derivatives (Mikkelsen 2010)
+vec3 suitBump(vec3 pos, vec3 n, float h, float faceDir) {
+  vec3 sx = dFdx(pos), sy = dFdy(pos);
+  vec3 r1 = cross(sy, n), r2 = cross(n, sx);
+  float det = dot(sx, r1) * faceDir;
+  vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+  return normalize(abs(det) * n - grad);
+}`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+      normal = suitBump(-vViewPosition, normal, suitHeight, faceDirection);`)
       .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>
-      material.sheenColor *= 1. - .9 * suitStripe; // dyed stripes: no white sheen over the red`)
+      // dyed stripes and dust: no white sheen over them
+      material.sheenColor *= (1. - .9 * suitStripe) * (1. - .6 * suitDust);`)
       .replace('#include <color_fragment>', `#include <color_fragment>
-      float suitStripe = 0.;
+      float suitStripe = 0., suitHeight = 0., suitDust = 0.;
       {
-        float ax = abs(vBody.x);
-        float arm = step(.31, ax) * step(.69, vBody.y);
-        float aa = fwidth(vBody.y) + .0015;
-        float stripe = (1. - arm) * step(.05, ax)
-          * smoothstep(.598 - aa, .598, vBody.y) * (1. - smoothstep(.652, .652 + aa, vBody.y));
+        float ax = abs(vBody.x), y = vBody.y;
+        float arm = step(.31, ax) * step(.69, y);
+        float leg = (1. - arm) * step(.05, ax) * (1. - step(.70, y));
+        float aa = fwidth(y) + .0015;
+        float stripe = leg * smoothstep(.598 - aa, .598, y) * (1. - smoothstep(.652, .652 + aa, y));
         suitStripe = stripe;
         diffuseColor.rgb = mix(diffuseColor.rgb, vec3(.36, .025, .03), stripe);
-        float glove = arm * (1. - smoothstep(${GLOVE_TOP.toFixed(3)} - .012, ${GLOVE_TOP.toFixed(3)}, vBody.y));
-        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(.66, .67, .69), glove);
-        float tip = glove * (1. - smoothstep(.748, .772, vBody.y));
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(.16, .16, .17), tip * .85);
+
+        // round the leg: c from the leg's axis, a = 0 outside, pi/2 front, pi inside
+        vec2 c = vec2(ax - .16, vBody.z - .085);
+        float a = atan(c.y, c.x), r = length(c);
+        float front = .5 + .5 * sin(a);
+
+        // knee convolutes: seven rings, deepest in front, fading into the thigh and shin
+        float knee = leg * smoothstep(.425, .45, y) * (1. - smoothstep(.53, .555, y));
+        float kp = suitPleat(y - .425, .0185);
+        suitHeight += knee * (.2 + .8 * front) * .0042 * kp;
+        diffuseColor.rgb *= 1. - knee * (.2 + .6 * front) * .16 * (1. - kp);
+        // elbow convolutes, across the arm's axis at the elbow
+        vec3 e = vec3(ax, y, vBody.z) - vec3(.425, 1.11, .03);
+        float t = dot(e, normalize(vec3(.19, -.97, .06)));
+        float elbow = arm * smoothstep(.13, .09, length(e)) * (1. - smoothstep(.035, .055, abs(t)));
+        float ep = suitPleat(t + .055, .016);
+        suitHeight += elbow * .0032 * ep;
+        diffuseColor.rgb *= 1. - elbow * .12 * (1. - ep);
+
+        // side seams on the lower legs: a shallow groove with a row of stitches either side
+        float seamRun = leg * smoothstep(.15, .18, y) * (1. - smoothstep(.405, .425, y));
+        float d = min(abs(a), 3.14159265 - abs(a)) * r;
+        suitHeight -= seamRun * .0012 * exp(-pow(d / .0024, 2.));
+        float fine = 1. - smoothstep(.0015, .004, fwidth(y)); // stitches only where they resolve
+        float stitch = seamRun * fine * exp(-pow((d - .0052) / .0009, 2.)) * step(.45, fract(y / .0065));
+        diffuseColor.rgb *= 1. - .22 * stitch;
+
+        // lunar dust: up the boots and shins with a ragged edge, patchy, and scuffed onto the knees
+        float n1 = suitNoise(vBody * 9.), n2 = .6 * suitNoise(vBody * 23.) + .4 * suitNoise(vBody * 67.);
+        float dust = (1. - arm) * (1. - smoothstep(.12 + .1 * n1, .3 + .12 * n1, y));
+        dust += leg * .45 * front * exp(-pow((y - .48) / .045, 2.)) * smoothstep(.35, .75, n1);
+        dust = clamp(dust, 0., 1.) * smoothstep(.15, .85, n2);
+        suitDust = dust;
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(.6, .58, .55), dust * .7);
       }`);
   };
-  m.customProgramCacheKey = () => 'suit-fabric-markings';
+  m.customProgramCacheKey = () => 'suit-fabric-markings-relief';
   return m;
 }
 
@@ -88,9 +143,12 @@ function fabric(source: MeshStandardMaterial): MeshPhysicalMaterial {
  *  sleeve, y ~ 0.88; everything below it is the glove. */
 const WRIST = new Vector3(.487, .884, .152); // before the legs are lengthened (stretchY)
 const GLOVE_TOP = .862, CUFF_TOP = .894; // glove fully on the hand bone below GLOVE_TOP, blended up to CUFF_TOP
-/** the model's gloves are small and thin-fingered for its bulky sleeves: grow them about the
- *  wrist, more across the palm and fingers (x, z) than along them (y), like a pressurized glove */
-const GLOVE_SCALE = new Vector3(1.34, 1.18, 1.38);
+/** the model's own gloves are small, thin-fingered and low-poly for its bulky sleeves: they are
+ *  folded away into the sleeve and replaced by a pressurized EVA glove (suitGlove.ts) */
+const isGlove = (x: number, y: number) => x > .31 && y > .69 && y < WRIST.y + .001;
+/** where the old glove is folded to: just above the wrist, inside the ring, so the sleeve's open
+ *  end closes in a short cone hidden by the ring and the new glove's gauntlet */
+const FOLD_Y = WRIST.y + .008;
 /** share of the palms-up roll taken by the forearm; the wrist turns the rest (like a real arm),
  *  so the sleeve is not wrung at the elbow */
 const FOREARM_ROLL = .45;
@@ -138,6 +196,7 @@ export class WalkSuit {
   private readonly rings: Mesh<LatheGeometry, MeshStandardMaterial>[] = [];
   /** helmet, backpack, hoses and flag (suitGear.ts) */
   private readonly gear: SuitGear;
+  private readonly gloveParts = gloveParts();
   private readonly skin: SkinnedMesh<BufferGeometry, MeshStandardMaterial>;
   private readonly target = new Vector3();
   private readonly raisedHand = new Vector3();
@@ -222,6 +281,7 @@ export class WalkSuit {
       ring.receiveShadow = true;
       arm.lower.add(ring);
       this.rings.push(ring);
+      hand.add(buildGlove(side as 1 | -1, this.gloveParts));
     }
     const kneeIndex: number[] = [];
     for (let i = 0; i < 2; i++) {
@@ -263,6 +323,11 @@ export class WalkSuit {
     g.setAttribute('bodyPos', p.clone());
     for (let i=0; i<p.count; i++) {
       const x=Math.abs(p.getX(i)), y=p.getY(i);
+      if (isGlove(x, y)) {
+        // collapse onto the wrist centre (inside the cuff): the old hand leaves no triangles or shadow
+        p.setXYZ(i, Math.sign(p.getX(i))*WRIST.x, stretchY(FOLD_Y, true), WRIST.z);
+        continue;
+      }
       p.setY(i, stretchY(y, x > 0.31 && y > 0.69));
     }
     p.needsUpdate = true;
@@ -272,8 +337,6 @@ export class WalkSuit {
     this.skin = new SkinnedMesh(g, fabric(source.material));
     this.skin.add(this.hips);
     this.skin.bind(new Skeleton(bones));
-    // grow the gloves after binding (a bind-time scale would be cancelled by the inverse bind matrices)
-    for (const hand of this.hands) hand.scale.copy(GLOVE_SCALE);
     this.skin.frustumCulled = false;
     this.skin.receiveShadow = true;
     this.group.add(this.skin);
@@ -359,7 +422,8 @@ export class WalkSuit {
       if (grip) this.torso.worldToLocal(this.target.copy(grip));
       else {
         const legLead=((pose.center.x-pose.home.x)*sin+(pose.center.z-pose.home.z)*cos)/scale;
-        this.target.set(side*(.325+.032*this.motion),.84+.065*this.motion+.18*this.sprintLean,.14-(.50+.45*this.sprintLean)*legLead);
+        // a pressurized suit holds the arms a little away from the body, gloves clear of the thigh pockets
+        this.target.set(side*(.395+.03*this.motion),.84+.065*this.motion+.18*this.sprintLean,.14-(.50+.45*this.sprintLean)*legLead);
         if (this.handsRaised > 0) {
           // Elbows bent, forearms level and forward, gloves about waist height, bobbing slightly together.
           const bob = .012*Math.sin(this.handsClock*2.2);
@@ -384,6 +448,8 @@ export class WalkSuit {
 
   dispose() {
     this.gear.dispose();
+    for (const g of this.gloveParts.geometries) g.dispose();
+    for (const m of this.gloveParts.materials) m.dispose();
     this.rings[0]?.geometry.dispose();
     this.rings[0]?.material.dispose();
     this.skin.skeleton.dispose();

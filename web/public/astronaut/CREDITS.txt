@@ -3,7 +3,9 @@ Extravehicular Mobility Unit by NASA / Michael D. Carbajal
 Model and source: https://science.nasa.gov/3d-resources/extravehicular-mobility-unit/
 NASA 3D Resources: https://science.nasa.gov/3d-resources/
 
-Lunar Walk adapted the EMU body and gloves to its first-person skeleton, removed
-the helmet and maneuvering unit, and added lunar overboots, tread, gaiters,
-pockets, cloth folds and woven material. The avatar combines an orbital EVA suit
+Lunar Walk adapted the EMU body to its first-person skeleton, removed the
+helmet and maneuvering unit, and added lunar overboots, tread, gaiters,
+pockets, cloth folds and woven material. CraterView replaced the model's gloves
+with procedural pressurized EVA gloves (web/src/suitGlove.ts) and added knee
+and elbow convolutes, leg seams and lunar dust in the suit's shader. The avatar combines an orbital EVA suit
 reference with purpose-built surface footwear.
