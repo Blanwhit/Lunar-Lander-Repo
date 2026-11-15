@@ -1,3 +1,4 @@
+import type { VrFeasibility } from './overlay/vrFeasibility';
 import {
   LinearFilter, LinearMipmapLinearFilter, Matrix4, MeshStandardMaterial, RepeatWrapping,
   SRGBColorSpace, Texture, TextureLoader, Vector2,
@@ -82,7 +83,7 @@ export function scanHeight(soil: SoilMaps, coords: Float32Array) {
   return ((a + (b-a)*coords[4])/255 - 0.5)*heightRange;
 }
 
-export function groundMaterial(soil: SoilMaps, landingToBody: Matrix4) {
+export function groundMaterial(soil: SoilMaps, landingToBody: Matrix4, scores?:VrFeasibility) {
   const material = new MeshStandardMaterial({
     map: soil.color, normalMap: soil.normal, normalScale: new Vector2(1,1),
     roughness: 1, vertexColors: true,
@@ -128,5 +129,6 @@ export function groundMaterial(soil: SoilMaps, landingToBody: Matrix4) {
         normal = normalize(tbn * vec3(fine.xy / max(fine.z, 0.3), 1.0));
       `);
   };
+  scores?.applyTo(material,`mat3(landingToBody)*vec3(position.x,${R_MOON.toFixed(1)}+position.y,position.z)`);
   return material;
 }

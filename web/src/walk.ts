@@ -253,7 +253,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     const [rocks,soil,atlas]=await preloadSurface();
     const field = new BoulderField(atlas, at.seed, at.height.coordinates);
     // built by prepareLanding (sliced, so a flight animating meanwhile keeps its frame rate)
-    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,field);
+    const next=new WalkGround(at.height,at.seed,1,rocks,soil,at.landingToBody,field,options.vrScores);
     try {await next.prepareLanding(x,z);return next;}
     catch(error){next.dispose();throw error;}
   }
@@ -933,6 +933,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
         suit.handsClock=lookIntro;
       }
     }
+    scores?.update(time);
     if(lookIntro<0)suit.handsRaised=0;
 
     if(missionLocal && !choosingLanding){

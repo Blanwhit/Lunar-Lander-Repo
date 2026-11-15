@@ -1,3 +1,4 @@
+import type { VrFeasibility } from './overlay/vrFeasibility';
 import {
   BufferAttribute, BufferGeometry, Color, DynamicDrawUsage, Group,
   IcosahedronGeometry, InstancedMesh, Matrix4, Mesh, MeshStandardMaterial, Object3D, DataTexture, Vector2, Ray, Vector3,
@@ -80,10 +81,10 @@ export class WalkGround {
   constructor(private readonly height: (x: number, z: number) => number,
     private readonly seed: number, private readonly rocky = 1, private readonly samples: RockSample[] = [],
     private readonly soil?: SoilMaps, landingToBody = new Matrix4(),
-    private readonly field?: BoulderField) {
+    private readonly field?: BoulderField, scores?:VrFeasibility) {
     soilUV(0, 0, this.coords);
     this.originRelief = soil ? scanHeight(soil, this.coords) : 0;
-    this.dust = soil ? groundMaterial(soil, landingToBody) : new MeshStandardMaterial({ vertexColors: true, roughness: 1 });
+    this.dust = soil ? groundMaterial(soil, landingToBody, scores) : new MeshStandardMaterial({ vertexColors: true, roughness: 1 });
     this.rocks = new MeshStandardMaterial({ roughness: 1 });
     for (let level = 0; level < RINGS; level++) {
       // More samples per ring at landscape scale keep distant ridgelines resolved.
