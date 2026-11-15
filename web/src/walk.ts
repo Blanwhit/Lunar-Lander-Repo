@@ -11,7 +11,7 @@ import { BoulderField } from './boulderField';
 import { describeRocks, loadRockAtlas } from './rockAtlas';
 import { loadRockSamples } from './lunarRocks';
 import type { LandingFrame } from './landingFlight';
-import { VrFeasibilityButton } from './overlay/vrFeasibilityButton';
+import { VrHudButton } from './overlay/vrHudButton';
 import type { VrFeasibility } from './overlay/vrFeasibility';
 import { showLandingGlobe, type GlobeHeadset } from './globePicker';
 import type { HelmetAudio } from './helmetAudio';
@@ -272,11 +272,14 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   const canvas = renderer.domElement;
   canvas.tabIndex = 0;
   canvas.setAttribute('aria-label', 'Lunar surface, first-person view');
-  const scoreButton = options.vrScores && new VrFeasibilityButton(options.vrScores);
+  const scores = options.vrScores;
+  const scoreButton = scores && VrHudButton.feasibility(scores, -.235);
+  const globeButton = new VrHudButton('Return to globe', requestGlobe, scores ? .235 : 0);
+  rig.add(globeButton.mesh);
   if (scoreButton) rig.add(scoreButton.mesh);
   const bar = document.createElement('div');
   bar.className = 'walk-bar';
-  bar.innerHTML = `<div class="walk-actions"><button type="button" class="walk-enter">Enter headset</button><button type="button" class="walk-touch">Hold to walk</button><button type="button" class="walk-exit">Exit VR</button></div><p class="walk-help walk-position"></p><p class="walk-help walk-controls"></p><p class="walk-status" role="status"></p>`;
+  bar.innerHTML = `<div class="walk-actions"><button type="button" class="walk-enter">Enter headset</button><button type="button" class="walk-touch">Hold to walk</button><button type="button" class="walk-exit">Return to globe</button></div><p class="walk-help walk-position"></p><p class="walk-help walk-controls"></p><p class="walk-status" role="status"></p>`;
   overlay.append(style, canvas, bar);
   overlay.style.opacity = '0';
   overlay.inert = true;
@@ -294,7 +297,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   help.textContent = desktopControls+' Click or tap terrain to travel there.';
   const abort = new AbortController();
   const listener = { signal: abort.signal };
-  const scores = options.vrScores;
   const screenToggle = document.createElement('button');
   const syncScreenToggle = () => {
     if (!scores) return;
@@ -305,7 +307,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   };
   if (scores) {
     screenToggle.type = 'button';
-    enter.after(screenToggle);
+    exit.before(screenToggle);
     screenToggle.addEventListener('click', () => { scores.toggle(); syncScreenToggle(); }, listener);
   }
   let activeSession: XRSession | null = null;
@@ -461,6 +463,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   function resetControls() {
     returnArmed = undefined;
     scoreButton?.hide();
+    globeButton.hide();
     keys.clear();
     gait.reset();
     jumpHeld = false;
@@ -650,6 +653,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     glare.dispose();
     sunlight.dispose();
     scoreButton?.dispose();
+    globeButton.dispose();
     samples.dispose(); wrist.dispose();
     suit.dispose();
     prints.dispose();
@@ -662,7 +666,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   }
   renderer.xr.addEventListener('sessionend', sessionEnded);
   navigator.xr?.addEventListener('devicechange', checkSupport, listener);
-  exit.addEventListener('click', leave, listener);
+  exit.addEventListener('click', () => { if (activeSession) requestGlobe(); else void leave(); }, listener);
   enter.addEventListener('click', toggleXR, listener);
   resetDesktop();
   // The globe picker keeps drawing while the surface loads. Take over its session
@@ -714,6 +718,12 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   });
 
+  function requestGlobe() {
+    if (activeSession && !choosingLanding && !relocating && !closed) {
+      void returnToGlobe(activeSession).catch(error => console.warn('VR globe unavailable', error));
+    }
+  }
+
   async function returnToGlobe(session: XRSession) {
     choosingLanding = true;
     queuedHit = undefined;
@@ -749,14 +759,16 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       if (!pose || activeSession.visibilityState !== 'visible') {
         returnArmed = undefined;
         scoreButton?.hide();
+        globeButton.hide();
         samples.release(); wrist.hide(); suit.resetFeet();
         return;
       }
-      if (scoreButton) {
-        const left = Array.from(activeSession.inputSources).find(source =>
-          source.handedness === 'left' && source.gamepad?.mapping === 'xr-standard');
-        scoreButton.update(pose, left, left && frame.getPose(left.targetRaySpace, space!));
-      }
+      const left = Array.from(activeSession.inputSources).find(source =>
+        source.handedness === 'left' && source.gamepad?.mapping === 'xr-standard');
+      const aim = left && frame.getPose(left.targetRaySpace, space!);
+      scoreButton?.update(pose, left, aim);
+      globeButton.update(pose, left, aim);
+      if (choosingLanding) return;
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
@@ -788,7 +800,7 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
             running = !!pad.buttons[1]?.pressed;
             if (!pad.buttons[5]?.pressed) returnArmed = input;
             else if (returnArmed === input && !choosingLanding && !relocating) {
-              void returnToGlobe(activeSession).catch(error => console.warn('VR globe unavailable', error));
+              requestGlobe();
               return;
             }
           }

@@ -4,7 +4,7 @@ import {
   SphereGeometry, SRGBColorSpace, TextureLoader, Vector3, WebGLRenderer,
 } from 'three';
 
-import { VrFeasibilityButton } from './overlay/vrFeasibilityButton';
+import { VrHudButton } from './overlay/vrHudButton';
 import { VrHeatmap, type VrFeasibility } from './overlay/vrFeasibility';
 
 export interface GlobeHeadset {
@@ -40,7 +40,7 @@ export async function pickLandingInVR(session: XRSession, latitude: number, long
 export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSession,
   latitude: number, longitude: number, land: (lat: number, lon: number) => Promise<boolean | void>, scores?: VrFeasibility) {
   const scene = new Scene(), camera = new PerspectiveCamera(65, 1, .025, 10);
-  const scoreButton = scores && new VrFeasibilityButton(scores);
+  const scoreButton = scores && VrHudButton.feasibility(scores);
   if (scoreButton) scene.add(scoreButton.mesh);
   const stand = new Group();
   scene.add(stand);
