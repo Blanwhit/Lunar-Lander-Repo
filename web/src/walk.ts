@@ -1,7 +1,7 @@
 import {
   BufferAttribute, BufferGeometry, DirectionalLight, Euler, GLSL3, Group, HemisphereLight, MathUtils,
   Matrix3, Matrix4, Mesh, PerspectiveCamera, Quaternion, RawShaderMaterial, Scene, Sphere, Texture,
-  Vector2, Vector3, Vector4, WebGLRenderer, Raycaster, Ray,
+  Vector2, Vector3, Vector4, WebGLRenderer, Raycaster, Ray, Object3D, type Light,
 } from 'three';
 import { latLonToDir, R_MOON } from './geom';
 import type { SurfaceLocation, WalkTerrain } from './walkTerrain';
@@ -123,8 +123,65 @@ function createSky(options: WalkSite, sun: Vector3) {
   return sky;
 }
 
+/** Yield to the event loop (not throttled like timers in a background tab). */
+function nextTask() {
+  return new Promise<void>(resolve => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(0);
+  });
+}
+
+/** Upload the scene's textures one per task: the first render would otherwise upload them all
+ *  in one long frame, stalling the orbital landing flight that runs meanwhile. */
+async function uploadTextures(renderer: WebGLRenderer, scene: Scene) {
+  const textures = new Set<Texture>();
+  const add = (value: unknown) => { if (value instanceof Texture) textures.add(value); };
+  scene.traverse(object => {
+    const material = (object as Mesh).material;
+    for (const m of Array.isArray(material) ? material : material ? [material] : []) {
+      for (const value of Object.values(m)) add(value);
+      const uniforms = (m as RawShaderMaterial).uniforms;
+      if (uniforms) for (const uniform of Object.values(uniforms)) add(uniform?.value);
+    }
+  });
+  for (const texture of textures) {
+    renderer.initTexture(texture);
+    await nextTask();
+  }
+}
+
+/** Draw the scene a few parts at a time, a task each, so the buffer uploads of the first frame
+ *  are spread out too (the surface overlay is still transparent here). Lights stay on, so the
+ *  programs compiled by compileAsync are the ones used. */
+async function warmUp(renderer: WebGLRenderer, scene: Scene, camera: PerspectiveCamera) {
+  const units: Object3D[] = [];
+  for (const child of scene.children) {
+    if (!child.visible || (child as Light).isLight) continue;
+    if (child.children.length > 4) units.push(...child.children.filter(c => c.visible));
+    else units.push(child);
+  }
+  for (const unit of units) unit.visible = false;
+  try {
+    for (let i = 0; i < units.length; i += 6) {
+      const batch = units.slice(i, i + 6);
+      for (const unit of batch) unit.visible = true;
+      renderer.render(scene, camera);
+      for (const unit of batch) unit.visible = false;
+      await nextTask();
+    }
+  } finally {
+    for (const unit of units) unit.visible = true;
+  }
+}
+
 export function preloadSurface() {
   return Promise.all([loadRockSamples(),loadSoilMaps(),loadRockAtlas()]);
+}
+
+/** Warm everything a landing needs that doesn't depend on the renderer (assets + suit model). */
+export function prefetchWalk() {
+  return Promise.all([preloadSurface(), WalkSuit.preload()]);
 }
 
 /** Open an eye-level desktop preview. Headset permission is requested by Enter headset. */
@@ -554,7 +611,10 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   enter.addEventListener('click', toggleXR, listener);
   resetDesktop();
   // Upload the walking scene behind the globe before starting the dissolve.
+  // (textures, programs and buffers in separate tasks, so the flight keeps animating)
+  await uploadTextures(renderer, scene);
   await renderer.compileAsync(scene,camera);
+  await warmUp(renderer, scene, camera);
   renderer.render(scene, camera);
   options.onPrepared(entry => {
     if (closed || entry.opacity <= 0) return;

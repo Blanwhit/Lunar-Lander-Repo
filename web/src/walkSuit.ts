@@ -35,6 +35,8 @@ class Limb {
   }
 }
 
+let suitBytes: Promise<ArrayBuffer> | undefined;
+
 export class WalkSuit {
   readonly group = new Group();
   readonly outsoles: WalkOutsole[];
@@ -60,8 +62,20 @@ export class WalkSuit {
   private hipShift = 0;
   private motion = 0;
 
+  /** fetch the suit model once (prefetchable); each landing parses its own copy, since
+   *  dispose() frees the parsed geometry and material */
+  static preload(): Promise<ArrayBuffer> {
+    return suitBytes ??= fetch(import.meta.env.BASE_URL + 'astronaut/eva-suit.glb')
+      .then((response) => {
+        if (!response.ok) throw new Error('Could not load the suit model');
+        return response.arrayBuffer();
+      })
+      .catch((error) => { suitBytes = undefined; throw error; });
+  }
+
   static async load() {
-    const gltf = await new GLTFLoader().loadAsync(import.meta.env.BASE_URL + 'astronaut/eva-suit.glb');
+    const bytes = await WalkSuit.preload();
+    const gltf = await new GLTFLoader().parseAsync(bytes.slice(0), import.meta.env.BASE_URL + 'astronaut/');
     const source = gltf.scene.getObjectByProperty('isMesh', true) as Mesh<BufferGeometry, MeshStandardMaterial>;
     return new WalkSuit(source);
   }

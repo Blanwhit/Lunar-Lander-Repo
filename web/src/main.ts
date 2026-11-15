@@ -181,8 +181,25 @@ async function main() {
     controls.flyTo(dir);
     popup.show(site.lat, site.lon);
     void scoreSite();
+    prefetchWalk(site.lat, site.lon);
     needsRender = true;
   });
+
+  // "Enter VR" is the popup's main action: warm the walk while the popup is read, so the
+  // landing only has to build the scene. Deferred a little so the fly-to stays smooth, and
+  // skipped if the popup was closed or moved on in the meantime.
+  let prefetched: { lat: number; lon: number; terrain: Promise<import('./walkTerrain').WalkTerrain> } | null = null;
+  let prefetchTimer = 0;
+  function prefetchWalk(lat: number, lon: number) {
+    clearTimeout(prefetchTimer);
+    prefetchTimer = window.setTimeout(() => {
+      if (!site || site.lat !== lat || site.lon !== lon) return;
+      void import('./walk').then((walk) => walk.prefetchWalk()).catch(() => {});
+      const terrain = import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+      terrain.catch(() => { if (prefetched?.terrain === terrain) prefetched = null; });
+      prefetched = { lat, lon, terrain };
+    }, 300);
+  }
 
   /** body-frame surface point under a CSS-pixel position (ray-marched against loaded terrain) */
   function pickSurface(px: number, py: number): Vector3 | null {
@@ -470,10 +487,14 @@ async function main() {
   };
   async function enterVR(lat: number, lon: number) {
     landingBusy = true;
-    // warm the surface assets while the popup closes
-    void import('./walk').then((walk) => walk.preloadSurface()).catch(() => {});
-    const selectedTerrain = import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+    clearTimeout(prefetchTimer);
+    // reuse the popup's prefetch for this spot, otherwise start loading now
+    const selectedTerrain = prefetched && prefetched.lat === lat && prefetched.lon === lon
+      ? prefetched.terrain
+      : import('./walkTerrain').then((module) => module.loadWalkTerrain(lat, lon));
+    prefetched = null;
     void selectedTerrain.catch(() => {});
+    void import('./walk').then((walk) => walk.prefetchWalk()).catch(() => {});
     popup.close();
     const audio = new HelmetAudio();
     audio.start();
@@ -490,7 +511,27 @@ async function main() {
     const flight = landingFlight(controls, frameAt(lat, lon));
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     let elapsed = 0;
+    // The descent starts on the click; the walk scene is built while it flies. If it is not
+    // ready by the time the surface should fade in, the flight eases into a hold just before
+    // that point and picks up again (speed eased both ways) once the walk is prepared.
+    let ready = false;
+    let speed = 1;
+    const hold = flight.dissolveStart - 0.005;
     flightFrame = flight.sample(0);
+    advanceFlight = (dt) => {
+      const step = Math.min(dt, 1 / 30);
+      if (reduced) elapsed = ready ? 1 : 0;
+      else {
+        const target = ready ? 1 : Math.min(1, Math.max(0, (hold - elapsed) / 0.06));
+        speed += (target - speed) * -Math.expm1(-step * (ready ? 4 : 12));
+        elapsed = Math.min(ready ? 1 : hold, elapsed + speed * step * 1000 / flight.duration);
+      }
+      flightFrame = flight.sample(elapsed);
+      const height = tree.heightAt([controls.tgt.x, controls.tgt.y, controls.tgt.z]);
+      if (height !== null) controls.pivotHeight += (height - controls.pivotHeight) * -Math.expm1(-dt * 8);
+      walking = ready && flightFrame.opacity >= 1;
+    };
+    showOrbit(false);
     canvas.inert = true;
     const restore = () => {
       audio.dispose();
@@ -536,15 +577,8 @@ async function main() {
       surfaceStars = walkSite.sky;
       await startWalk(document.body, { ...walkSite, siteAt, audio, onExit: restore,
         onPrepared(draw) {
-          showOrbit(false);
           drawApproach = draw;
-          advanceFlight = (dt) => {
-            elapsed = reduced ? 1 : Math.min(1, elapsed + Math.min(dt, 1 / 30) * 1000 / flight.duration);
-            flightFrame = flight.sample(elapsed);
-            const height = tree.heightAt([controls.tgt.x, controls.tgt.y, controls.tgt.z]);
-            if (height !== null) controls.pivotHeight += (height - controls.pivotHeight) * -Math.expm1(-dt * 8);
-            walking = flightFrame.opacity >= 1;
-          };
+          ready = true;
         },
         onArrived() {
           advanceFlight = undefined;
