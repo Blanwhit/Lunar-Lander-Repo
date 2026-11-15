@@ -246,21 +246,40 @@ API share this module, so they combine their inputs identically.
 1. **Utility curves.** Each raw sub-factor is mapped to 0–100 by a piecewise-linear curve.
    A curve can declare a *knockout*, a value at which the site is impossible.
 2. **Category scores.** Sub-factors combine into category scores, and categories into an
-   overall score, with a weighted power mean M_p = (Σ wᵢ sᵢᵖ)^(1/p). With p = −2 the score is
-   pulled toward the weakest factor without that factor erasing everything else. Scores are
-   floored at 1 so that p < 0 stays finite.
+   overall score, with a weighted power mean M_p = (Σ wᵢ sᵢᵖ)^(1/p). The default is the
+   geometric mean (p = 0): the score leans toward the weakest factor without that factor
+   erasing everything else. Scores are floored at 1 so that the mean stays finite.
 3. **Gates.** Critical categories have a gate: gᵢ = 1 if sᵢ ≥ τᵢ, else (sᵢ/τᵢ)^k. The final
-   score is clamp(G·M, 1, 100), where G = Πgᵢ, and G = 0 on any knockout.
+   score is clamp(G·M, 1, 100), where G = Πgᵢ, and G = 0 on any knockout. Power and Comms
+   gates are soft (τ = 10, k = 1): they only bite when a category is nearly absent, so a weak
+   category is penalised once (by the mean), not three times (mean + p < 0 + hard gate).
+
+**Grazing geometry.** Near the poles the Sun and the Earth skim the horizon, so two choices
+make the score usable there:
+- **Mast height.** Power is scored for a panel 10 m above the ground and Comms for an antenna
+  10 m up (`panelHeightM`, `antennaHeightM`; the brief allowed 2–10 m for the panel). Published
+  polar illumination studies show ridges gaining several percentage points of sunlight going
+  from 2 m to 10 m. The landing temperature still uses the ground (the query's
+  `observerHeightM`, default 2 m).
+- **Horizon tolerance δ = 0.4°** (`horizonToleranceDeg`). A body counts as visible while its
+  margin above the terrain horizon is > −δ. This covers DEM error at the 20 m polar grid and
+  diffraction at grazing angles. It applies to the Sun and the Earth in every Power/Comms input
+  (visible now, hours remaining, link margin, annual statistics), on top of the API's
+  `linkMaskDeg`. The reported geometry (`earth`, `sun`, `earthConnectivity`, rise/set events)
+  stays physical: observer height, no tolerance.
+
+The overlay bakes both into its tiles (`MAST_H`, `HORIZON_TOL` in
+[feasibility_grid.py](pipeline/feasibility_grid.py)); keep them equal to the config.
 
 Defaults. **All of these are placeholders; replace them with your lander's tolerances** in
 `DEFAULT_FEASIBILITY`:
 
 | category (weight) | sub-factor (weight) | utility curve (value → score) |
 |---|---|---|
-| **Power** (0.25), gate τ = 20, k = 2 | Sun visible now (0.35) | visible fraction of the solar disc 0 → 0, 1 → 100 |
+| **Power** (0.25), gate τ = 10, k = 1 | Sun visible now (0.35) | visible fraction of the solar disc 0 → 0, 1 → 100 |
 | | sunlight remaining (0.35) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
 | | annual illumination (0.30) | mean visible-disc fraction over 2026: 0 → 0, 0.3 → 40, 0.6 → 80, 0.9 → 100 |
-| **Earth connectivity** (0.25), gate τ = 20, k = 2 | Earth visible now (0.30) | 0 → 0, 1 → 100 |
+| **Earth connectivity** (0.25), gate τ = 10, k = 1 | Earth visible now (0.30) | 0 → 0, 1 → 100 |
 | | link margin above the terrain (0.20) | 0° → 0, 2° → 60, 10° → 100 |
 | | Earth contact remaining (0.25) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
 | | annual Earth visibility (0.25) | fraction of 2026: 0 → 0, 0.5 → 70, 1 → 100 |
@@ -268,7 +287,7 @@ Defaults. **All of these are placeholders; replace them with your lander's toler
 | | surface temperature (0.30) | 40 K → 10, 100 K → 70, 130–360 K → 100, 420 K → 30 |
 | | elevation, as local prominence (0.10) | height above the mean of a 3 km ring: −500 m → 40, 0 → 80, +300 m → 100 |
 
-With p = −2, any sub-score near 0 dominates its category no matter how small its weight. That's
+Any sub-score near 0 dominates its category no matter how small its weight. That's
 why the non-critical curves (temperature and prominence) keep a non-zero floor. The method
 reproduces the worked example: categories of 27 / 56 / 70 with weights 0.25 / 0.25 / 0.5 give
 56 (p = 1), 52 (geometric), 44 (p = −2) and 27 (minimum).
@@ -296,6 +315,9 @@ ones arrive.
 
 **Where the overlay differs from the API at the same point:**
 - **Horizon resolution:** 64 azimuths instead of 360.
+- **Mast height:** the overlay's horizons are marched once, from 10 m, for the Sun, the Earth
+  and the temperature proxy; the API uses the config's panel and antenna heights for the score
+  and the query height for the temperature.
 - **Terrain detail:** the overlay uses height tiles up to level 6 (167 m) globally and level 9
   (20 m) near the poles, while the API uses everything down to 5 m. Slopes therefore differ
   where the terrain is rough at small scales.

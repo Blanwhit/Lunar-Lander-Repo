@@ -3,7 +3,7 @@
 // pipeline/feasibility_grid.py) and evaluates the time-dependent feasibility score of every
 // sample for a Sun/Earth timeline sent by the main thread.
 import { FACES, R_MOON } from '../geom';
-import { feasibilityScorer, type FeasibilityConfig, type FeasibilityInputs } from '../api/feasibility';
+import { DEFAULT_FEASIBILITY, feasibilityScorer, type FeasibilityConfig, type FeasibilityInputs } from '../api/feasibility';
 import { albedo, EMISSIVITY, SIGMA } from '../api/thermal';
 
 export const STEP_H = 3; // timeline spacing (h)
@@ -49,11 +49,15 @@ interface Bounds {
 const tiles = new Map<string, Tile>();
 let timeline: { token: number; sun: Float64Array; earth: Float64Array; sunB: Bounds; earthB: Bounds } | null = null;
 let score = feasibilityScorer(); // same result as feasibility(inp, config).score
+// horizon tolerance (deg): Sun / Earth count as visible down to this far below the horizon.
+// The mast height is baked into the tiles (their horizons are seen from MAST_H).
+let tol = DEFAULT_FEASIBILITY.horizonToleranceDeg;
 const inp = {} as FeasibilityInputs; // reused for every sample
 const DEG = Math.PI / 180;
 const R_SUN_KM = 695700, R_EARTH_KM = 6371, AU_KM = 149597870.7;
 const SITE_MAX_KM = (R_MOON + 11000) / 1000; // highest possible observer (km from the centre)
 const SAFE = 1e-4; // deg of slack on every proof (float rounding)
+const MAST_H = 10; // observer height (m) the tiles' horizons were marched from: pipeline MAST_H
 
 /** angle (deg) between timeline vectors i and j: atan2 form, accurate for tiny angles */
 function angleDeg(v: Float64Array, i: number, j: number): number {
@@ -132,7 +136,7 @@ async function load(key: string, url: string): Promise<number> {
       const dx = Math.cos(asp) * nx + Math.sin(asp) * ex, dy = Math.cos(asp) * ny + Math.sin(asp) * ey, dz = Math.cos(asp) * nz + Math.sin(asp) * ez;
       const cs = Math.cos(s), sn = aspect[k] === 65535 ? 0 : Math.sin(s);
       t.normal.set([ux * cs + dx * sn, uy * cs + dy * sn, uz * cs + dz * sn], k3);
-      const r = (R_MOON + height[k] + 2) / 1000;
+      const r = (R_MOON + height[k] + MAST_H) / 1000;
       t.site.set([ux * r, uy * r, uz * r], k3);
       t.slope[k] = slope[k] / 100;
       t.prominence[k] = prom[k];
@@ -172,27 +176,28 @@ function geo(t: Tile, k: number, body: Float64Array, vi: number, radiusKm: numbe
 }
 
 /**
- * Hours until the margin first drops to <= 0, scanning the forward timeline. Steps where the
- * elevation bound keeps the body above the sample's highest horizon bin are skipped (their
- * margin is provably > 0); the step before a crossing is evaluated for the interpolation, so
- * the result is the same as evaluating every step.
+ * Hours until the margin + tolerance `tl` first drops to <= 0, scanning the forward timeline.
+ * Steps where the elevation bound keeps the body above the sample's highest horizon bin minus
+ * `tl` are skipped (their margin is provably > -tl); the step before a crossing is evaluated
+ * for the interpolation, so the result is the same as evaluating every step. `m0` is the
+ * tolerance-shifted margin now.
  */
 function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number, m0: number, el0: number,
-  B: Bounds, g: Float64Array): number {
+  tl: number, B: Bounds, g: Float64Array): number {
   let prev = m0, prevS = 0, a = 0, elA = el0;
-  const top = t.hzMax[k] + 2 * B.parallax + SAFE;
+  const top = t.hzMax[k] - tl + 2 * B.parallax + SAFE;
   for (let s = 1; s <= FWD_STEPS; s++) {
     if (elA - (B.fwd[s] - B.fwd[a]) > top) continue;
     geo(t, k, body, s, radiusKm, g);
-    if (g[0] <= 0) {
-      const m = g[0];
+    if (g[0] + tl <= 0) {
+      const m = g[0] + tl;
       if (prevS !== s - 1) {
         geo(t, k, body, s - 1, radiusKm, g);
-        prev = g[0];
+        prev = g[0] + tl;
       }
       return STEP_H * (s - 1 + prev / (prev - m));
     }
-    prev = g[0];
+    prev = g[0] + tl;
     prevS = a = s;
     elA = g[6];
   }
@@ -206,14 +211,15 @@ function compute(t: Tile, sun: Float64Array, earth: Float64Array, sunB: Bounds, 
     const k3 = 3 * k;
     // Sun now
     geo(t, k, sun, 0, R_SUN_KM, g);
-    const sm = g[0], vf = discFraction(g[0], g[1]), sunEl = g[6];
+    // vf: physical (drives the temperature); sm / svf: with the tolerance (drive the Power score)
+    const sm = g[0] + tol, vf = discFraction(g[0], g[1]), svf = discFraction(sm, g[1]), sunEl = g[6];
     const ci = g[3] * t.normal[k3] + g[4] * t.normal[k3 + 1] + g[5] * t.normal[k3 + 2];
     const flux = 1361 * (AU_KM / g[2]) ** 2;
-    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, sunEl, sunB, g) : 0;
+    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, sunEl, tol, sunB, g) : 0;
     // Earth now
     geo(t, k, earth, 0, R_EARTH_KM, g);
-    const em = g[0], evf = discFraction(g[0], g[1]);
-    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, g[6], earthB, g) : 0;
+    const em = g[0] + tol, evf = discFraction(em, g[1]);
+    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, g[6], tol, earthB, g) : 0;
     // temperature proxy (calibrated against the 1-D model, see README)
     const tDeep = Math.max(20, 0.86 * Math.pow(t.meanAbs[k] / (EMISSIVITY * SIGMA), 0.25));
     const floor = Math.max(20, 0.4 * tDeep), tSet = Math.max(floor, 0.6 * tDeep);
@@ -236,7 +242,7 @@ function compute(t: Tile, sun: Float64Array, earth: Float64Array, sunB: Bounds, 
       }
       temp = isFinite(hrs) ? floor + (tSet - floor) * Math.exp(-hrs / 60) : floor;
     }
-    inp.sunVisibleNow = vf;
+    inp.sunVisibleNow = svf;
     inp.sunHoursRemaining = sunH;
     inp.annualIllumination = t.annualSun[k];
     inp.earthVisibleNow = evf;
@@ -266,6 +272,7 @@ self.onmessage = async (ev: MessageEvent<FeasMsg>) => {
     timeline = { token: m.token, sun: m.sun, earth: m.earth, sunB: bounds(m.sun, R_SUN_KM), earthB: bounds(m.earth, R_EARTH_KM) };
   } else if (m.type === 'config') {
     score = feasibilityScorer(m.config);
+    tol = m.config.horizonToleranceDeg;
   } else if (m.type === 'drop') {
     tiles.delete(m.key);
   } else if (m.type === 'compute') {

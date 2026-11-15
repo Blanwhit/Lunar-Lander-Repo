@@ -9,12 +9,13 @@ Samples are corner-aligned (edge samples shared with the neighbour tile).
 
 For every sample, from the same height tiles the viewer and the site API use:
   height, slope + aspect (central differences over 2 grid cells), prominence (height
-  minus the mean of 8 points on a 3 km ring), a 64-azimuth terrain horizon (ray march with
-  the site API's rules: ~0.15 deg angular resolution, stop when even +10.8 km terrain could
-  no longer rise above the horizon), and statistics over the reference year 2026 (6 h
-  steps, JPL Horizons ephemeris + IAU 2015 rotation): mean visible solar-disc fraction,
-  fraction of time the Earth's centre is above the terrain horizon, mean absorbed solar
-  flux on the local slope (drives the viewer's temperature proxy).
+  minus the mean of 8 points on a 3 km ring), a 64-azimuth terrain horizon seen from a
+  MAST_H mast (ray march with the site API's rules: ~0.15 deg angular resolution, stop when
+  even +10.8 km terrain could no longer rise above the horizon), and statistics over the
+  reference year 2026 (6 h steps, JPL Horizons ephemeris + IAU 2015 rotation): mean visible
+  solar-disc fraction and fraction of time the Earth's centre is above the terrain horizon
+  (both counting a body visible down to HORIZON_TOL below the horizon, as the score does),
+  mean absorbed solar flux on the local slope (drives the viewer's temperature proxy).
 
 The viewer evaluates the time-dependent part (Sun/Earth now, hours remaining, temperature)
 in a Web Worker and combines everything with web/src/api/feasibility.ts.
@@ -61,7 +62,10 @@ S = 64
 NAZ = 64
 ANG = 0.0026  # target angular resolution of the terrain grid along a ray (~0.15 deg)
 H_MAX = 10800.0
-OBS_H = 2.0
+# observer height and horizon tolerance of the feasibility score: keep equal to
+# panelHeightM / antennaHeightM and horizonToleranceDeg in web/src/api/feasibility.ts
+MAST_H = 10.0
+HORIZON_TOL = 0.4
 RING_M = 3000.0
 REF_YEAR = 2026
 R_SUN_KM, R_EARTH_KM, AU_KM = 695700.0, 6371.0, 149597870.7
@@ -349,12 +353,12 @@ def process_tile(key):
     U = np.repeat(up, NAZ, 0)
     HD = (np.cos(np.radians(azs))[None, :, None] * north[:, None, :]
           + np.sin(np.radians(azs))[None, :, None] * east[:, None, :]).reshape(-1, 3)
-    r0 = np.repeat(R + h0 + OBS_H, NAZ)
+    r0 = np.repeat(R + h0 + MAST_H, NAZ)
     best_t = march_horizon(T, U, HD, r0, max(2.0, 0.5 * float(cell.min())))
     horizon = np.degrees(np.arctan(best_t)).reshape(P, NAZ)
 
     # ---- reference-year statistics
-    site = up * (R + h0 + OBS_H)[:, None] / 1000.0  # km
+    site = up * (R + h0 + MAST_H)[:, None] / 1000.0  # km
     n_t = _SUN.shape[0]
     sun_sum = np.zeros(P)
     earth_sum = np.zeros(P)
@@ -375,14 +379,15 @@ def process_tile(key):
             hz = horizon[pidx, i0] * (1 - w) + horizon[pidx, i1] * w
             margin = el - hz
             if rad == R_SUN_KM:
-                vf = disc_fraction(margin, np.degrees(np.arcsin(rad / dist)))
-                sun_sum += vf.sum(0)
+                r_ang = np.degrees(np.arcsin(rad / dist))
+                vf = disc_fraction(margin, r_ang)
+                sun_sum += disc_fraction(margin + HORIZON_TOL, r_ang).sum(0)
                 ci = np.sum(u * normal, -1)
                 flux = 1361.0 * (AU_KM / dist) ** 2
                 inc = np.degrees(np.arccos(np.clip(ci, -1, 1)))
                 abs_sum += np.where(ci > 0, (1 - albedo(inc)) * flux * ci * vf, 0).sum(0)
             else:
-                earth_sum += (margin > 0).sum(0)
+                earth_sum += (margin + HORIZON_TOL > 0).sum(0)
 
     def u16(v, scale):
         return np.clip(np.round(v * scale), 0, 65535).astype("<u2")
@@ -452,7 +457,8 @@ def main():
     meta_p = TILES / "meta.json"
     meta = json.loads(meta_p.read_text())
     meta["feasibility"] = {"format": "MLF1", "samples": S, "azimuths": NAZ, "maxLevel": a.polar_level,
-                           "globalLevel": a.global_level, "polarLat": a.polar_lat, "referenceYear": REF_YEAR}
+                           "globalLevel": a.global_level, "polarLat": a.polar_lat, "referenceYear": REF_YEAR,
+                           "mastHeightM": MAST_H, "horizonToleranceDeg": HORIZON_TOL}
     meta_p.write_text(json.dumps(meta, indent=1))
     print(f"done in {time.time() - t_all:.0f} s")
 
