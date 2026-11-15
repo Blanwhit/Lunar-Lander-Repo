@@ -8,10 +8,11 @@ import { H_MAX_GLOBAL, H_MIN_GLOBAL, R_MOON, type Vec3 } from './geom';
 const glareVS = /* glsl */ `
 precision highp float;
 in vec2 position;
+uniform vec2 uEyeOffset;
 uniform vec2 uTanHalf;      // (tan(fovx/2), tan(fovy/2))
 out vec2 vT;                // view-space tangent-plane coordinates (z = -1)
 void main() {
-  vT = position * uTanHalf;
+  vT = (position + uEyeOffset) * uTanHalf;
   gl_Position = vec4(position, 1.0, 1.0);
 }
 `;
@@ -90,6 +91,7 @@ export class SunGlare {
       transparent: true,
       blending: AdditiveBlending,
       uniforms: {
+        uEyeOffset: { value: [0, 0] },
         uTanHalf: { value: [1, 1] },
         uSunV: { value: new Vector3(0, 0, -1) },
         uSunT: { value: [0, 0] },
@@ -110,7 +112,7 @@ export class SunGlare {
    * @param visibility visible fraction of the disc (0..1); only called (it marches a ray over
    *                   the terrain) when the pass can draw, i.e. the Sun is near the view
    */
-  update(viewRot: Matrix3, toSun: Vector3, sunR: number, visibility: () => number, tanHalf: [number, number], pixAngle: number, dt: number): boolean {
+  update(viewRot: Matrix3, toSun: Vector3, sunR: number, visibility: () => number, tanHalf: [number, number], pixAngle: number, dt: number, eyeOffset: [number,number] = [0,0]): boolean {
     const v = toSun.clone().applyMatrix3(viewRot);
     const inView = -v.z > COS_70;
     const target = inView ? visibility() : 0;
@@ -121,6 +123,7 @@ export class SunGlare {
     u.uSunT.value = v.z < -1e-6 ? [v.x / -v.z, v.y / -v.z] : [v.x * 1e3, v.y * 1e3];
     u.uSunR.value = sunR;
     u.uVis.value = this.vis;
+    u.uEyeOffset.value = eyeOffset;
     u.uTanHalf.value = tanHalf;
     u.uPix.value = pixAngle;
     // skip the pass when nothing would show: hidden, or the Sun > 70 deg off the view axis

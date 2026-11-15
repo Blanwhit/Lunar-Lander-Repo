@@ -10,8 +10,7 @@ https://ares.jsc.nasa.gov/astromaterials3d/sample-details.htm?sample=14316-0
 Apollo 16, 60025,241 — ferroan anorthosite
 https://ares.jsc.nasa.gov/astromaterials3d/sample-details.htm?sample=60025-241
 
-The wrist display reports the approximate physical dimensions of each curated
-piece as scanned. The coordinate-registered OBJ files above and their Model
+The coordinate-registered OBJ files above and their Model
 Parameters PDFs specify metres. We projected the original mesh vertices onto
 their three principal axes, took the span along each axis, and converted to
 centimetres before resizing the meshes for the simulation. Values are rounded

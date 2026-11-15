@@ -10,6 +10,9 @@ import { buildGlove, gloveParts } from './suitGlove';
 import { WalkFeet, type BootPose } from './walkFeet';
 import { restSole, WalkOutsole } from './walkOutsole';
 
+// In the model the fingers point down and the thumb forward. In grip space they
+// point forward (-Z) and up, respectively, with the palms facing each other.
+const gloveToGrip = new Quaternion(0, Math.SQRT1_2, Math.SQRT1_2, 0);
 const lowerDirection = new Vector3();
 const rest = new Vector3(), direction = new Vector3(), bend = new Vector3(), joint = new Vector3();
 
@@ -198,6 +201,7 @@ export class WalkSuit {
   private readonly gear: SuitGear;
   private readonly gloveParts = gloveParts();
   private readonly skin: SkinnedMesh<BufferGeometry, MeshStandardMaterial>;
+  private readonly castNodes:(Bone | Group)[];
   private readonly target = new Vector3();
   private readonly raisedHand = new Vector3();
   private readonly forearmAxis = new Vector3();
@@ -337,12 +341,34 @@ export class WalkSuit {
     this.skin = new SkinnedMesh(g, fabric(source.material));
     this.skin.add(this.hips);
     this.skin.bind(new Skeleton(bones));
+    this.castNodes=[this.group,...bones];
     this.skin.frustumCulled = false;
-    this.skin.receiveShadow = true;
+    this.skin.castShadow = this.skin.receiveShadow = true;
     this.group.add(this.skin);
     // the wearer's left arm is the model's +x one (arms[1])
     this.gear = addSuitGear(this.torso, { bone: this.arms[1].upper, origin: this.arms[1].origin }, LIFT);
     this.group.visible = false;
+  }
+
+  castPose():number[] {
+    const pose=new Array<number>(this.castNodes.length*7+1);
+    for(let i=0;i<this.castNodes.length;i++){
+      this.castNodes[i].position.toArray(pose,i*7);
+      this.castNodes[i].quaternion.toArray(pose,i*7+3);
+    }
+    pose[pose.length-1]=this.group.scale.x;
+    return pose;
+  }
+
+  applyCastPose(pose:number[]) {
+    const nodes=this.castNodes;
+    if(pose.length!==nodes.length*7+1)return;
+    for(let i=0;i<nodes.length;i++){
+      nodes[i].position.fromArray(pose,i*7);
+      nodes[i].quaternion.fromArray(pose,i*7+3).normalize();
+    }
+    this.group.scale.setScalar(pose[pose.length-1]);
+    this.group.visible=true;
   }
 
   resetFeet() {
@@ -354,7 +380,7 @@ export class WalkSuit {
 
   update(x:number, y:number, z:number, facing:Vector3, eye:number, dx:number, dz:number, dt:number,
          airborne:boolean, lift:number, bothFeet:boolean, floor:(x:number,z:number)=>number,
-         grips: readonly (Vector3 | undefined)[], onSupport:(pose:BootPose, scale:number)=>void, impactSpeed:number,
+         grips: readonly (Vector3 | undefined)[], gripRotations: readonly Quaternion[], onSupport:(pose:BootPose, scale:number)=>void, impactSpeed:number,
          bedAt:(boot:BootPose,scale:number)=>number|null) {
     this.group.visible = true;
     // Size the suit once per tracking session. Crouching flexes the knees without resizing the soles.
@@ -434,7 +460,10 @@ export class WalkSuit {
       this.arms[i].aim(this.target,this.pole.set(side,.05,-.65));
       const hand = this.hands[i];
       hand.quaternion.identity();
-      if (!grip && this.handsRaised > 0) {
+      if (grip) {
+        this.arms[i].lower.getWorldQuaternion(this.inverse).invert();
+        hand.quaternion.copy(this.inverse).multiply(gripRotations[1-i]).multiply(gloveToGrip);
+      } else if (this.handsRaised > 0) {
         // Supinate until the palm (inward at rest) faces up: the forearm rolls part of the way
         // about its own axis and the wrist the rest, so neither the elbow nor the cuff is wrung.
         const arm = this.arms[i];

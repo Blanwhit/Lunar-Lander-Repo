@@ -1,6 +1,6 @@
 // Right-click site inspector: a dismissible hint at the top of the screen, and a popup
 // anchored to the picked surface point (coordinates, colour-coded feasibility score with its
-// next-month trend, "More info" / "Land" actions). Plain DOM, styled like the bottom HUD.
+// next-month trend, desktop and VR actions). Plain DOM, styled like the bottom HUD.
 import { scoreColor } from './siteGraphs';
 
 const CSS = `
@@ -77,6 +77,8 @@ const CSS = `
 .moon-site .btns button { all: unset; flex: 1; box-sizing: border-box; text-align: center; cursor: pointer;
   padding: 7px 11px; border-radius: 7px; border: 1px solid #eceef0; background: #eceef0; color: #101113;
   white-space: nowrap; }
+.moon-site .btns { flex-wrap:wrap; }
+.moon-site .btns button:disabled { opacity:.5; cursor:default; }
 .moon-site .btns button:hover { background: #ffffff; border-color: #ffffff; }
 .moon-site .btns button:active { background: #d4d7db; border-color: #d4d7db; }
 .moon-site .btns button:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 2px; }
@@ -89,13 +91,13 @@ const TIER_LABEL: Record<Tier, string> = { good: 'Good', fair: 'Fair', poor: 'Po
 
 const fmtDeg = (v: number) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)}°`;
 
-/** "Right click a spot to get more info  Got it" banner at the top of the screen.
+/** "Click or tap a point to select it  Got it" banner at the top of the screen.
  *  Returns a function that dismisses it (also called by "Got it"); safe to call repeatedly. */
 export function createHint(parent: HTMLElement): () => void {
   const el = document.createElement('div');
   el.className = 'moon-hint';
   el.setAttribute('role', 'status');
-  el.innerHTML = '<span>Right click a spot to get more info</span><button type="button">Got it</button>';
+  el.innerHTML = '<span>Click or tap a point to select it</span><button type="button">Got it</button>';
   let gone = false;
   const dismiss = () => {
     if (gone) return;
@@ -118,12 +120,12 @@ export class SitePopup {
   private trendRead: HTMLSpanElement;
   private trendBody: HTMLDivElement;
   private open = false;
+  readonly vrMessage: HTMLElement;
   /** called when the popup is closed by the user */
   onClose: () => void = () => {};
   /** called when "More info" is clicked */
   onMoreInfo: () => void = () => {};
-  /** called when "Land" is clicked: land at this site and open the surface walk */
-  onEnterVR: () => void = () => {};
+  onLand: () => void = () => {};
 
   constructor(parent: HTMLElement) {
     const style = document.createElement('style');
@@ -144,7 +146,8 @@ export class SitePopup {
       <div class="coords"><span class="k">Coordinates:</span><span class="v"></span></div>
       <div class="feas"></div>
       <div class="trend"><div class="hd"><span>Next 30 days</span><span class="rd"></span></div><div class="body"></div></div>
-      <div class="btns"><button type="button" data-act="info">More info</button><button type="button" data-act="vr">Land</button></div>`;
+      <div class="btns"><button type="button" data-act="info">More info</button><button type="button" data-act="land">Land</button></div>
+      <div class="vr-message" role="status" hidden></div>`;
     this.coords = el.querySelector('.coords .v') as HTMLSpanElement;
     this.feas = el.querySelector('.feas') as HTMLDivElement;
     this.trend = el.querySelector('.trend') as HTMLDivElement;
@@ -152,7 +155,8 @@ export class SitePopup {
     this.trendBody = el.querySelector('.trend .body') as HTMLDivElement;
     (el.querySelector('.close') as HTMLButtonElement).addEventListener('click', () => this.close());
     (el.querySelector('[data-act="info"]') as HTMLButtonElement).addEventListener('click', () => this.onMoreInfo());
-    (el.querySelector('[data-act="vr"]') as HTMLButtonElement).addEventListener('click', () => this.onEnterVR());
+    this.vrMessage = el.querySelector<HTMLElement>('.vr-message')!;
+    el.querySelector('[data-act="land"]')!.addEventListener('click', () => this.onLand());
     for (const ev of ['pointerdown', 'wheel', 'contextmenu'] as const) el.addEventListener(ev, (e) => e.stopPropagation());
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.open) this.close();
@@ -165,6 +169,7 @@ export class SitePopup {
     const lonW = ((((lon + 180) % 360) + 360) % 360) - 180;
     this.coords.textContent = `${fmtDeg(lat)}, ${fmtDeg(lonW)}`;
     this.coords.title = `latitude ${lat.toFixed(5)}°, longitude ${lonW.toFixed(5)}° E`;
+    this.vrMessage.hidden = true;
     this.setLoading();
     this.open = true;
     // restart the entry animation

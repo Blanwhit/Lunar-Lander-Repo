@@ -1,45 +1,38 @@
-// The landing shown when arriving at a site: the lunar module's last seconds of descent (a
-// second of free fall, descent-engine ignition, a smooth vertical braking drop onto the pad,
-// then the contact dynamics of landerDynamics.ts), watched by a camera that slowly orbits it.
-// One second after touchdown the camera glides down to the astronaut standing nearby; walk.ts
-// then hands control to the surface walk.
 import {
-  AdditiveBlending, CylinderGeometry, DataTexture, DoubleSide, EquirectangularReflectionMapping,
-  Group, MathUtils, Mesh, MeshStandardMaterial, Object3D, Quaternion,
-  ShaderMaterial, Vector3,
+  AdditiveBlending, CylinderGeometry, DataTexture, DoubleSide, EquirectangularReflectionMapping, ShaderMaterial,
+  Group, MathUtils, Mesh, MeshStandardMaterial, Quaternion, Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { LandingDust } from './landingDust';
 import { centreHeight, padRadius, LanderDynamics, LandingBed } from './landerDynamics';
 
-export type MissionView = 'Outside' | 'Surface';
+export type MissionView = 'Landing camera' | 'Surface';
 const base = import.meta.env.BASE_URL + 'mission/';
-let models: Promise<Group[]> | undefined;
+let landerAsset: Promise<Group> | undefined;
 export function preloadMission() {
-  return models ??= Promise.all(['lander'].map(async name =>
-    (await new GLTFLoader().loadAsync(base+name+'.glb')).scene)).catch(error => {models=undefined;throw error;});
+  return landerAsset ??= new GLTFLoader().loadAsync(base+'lander.glb').then(asset => asset.scene)
+    .catch(error => { landerAsset=undefined; throw error; });
 }
 
 const contactStep=1/120;
-/** rigid points that stop the engine at once if they touch: footpads and the descent-engine bell */
 const solidContacts=[
   [padRadius,0,0],[-padRadius,0,0],[0,0,padRadius],[0,0,-padRadius],[0,.38,0],
 ].map(([x,y,z])=>new Vector3(x,y,z));
+
 // Walking hitbox, in the lander's frame (origin at the footpad soles, +y up), with a margin
 // for the walker's reach so the camera never ends up inside the hull. The descent stage is a
 // solid octagonal block, each leg a sloping strut from the stage out to its footpad, and the
 // footpads low steps that can be stood on.
 const HULL_HALF=2.15, HULL_TOP=7, LEG_HALF=.3, LEG_IN=2.0, LEG_HIGH=2.6, LEG_LOW=.45;
 const PAD_R=.5, PAD_TOP=.22, REACH=.3;
-/** crew response after the contact light: the Apollo 11 press kit's nominal second */
-const CONTACT_RESPONSE_S=1;
-/** a surface-sensing probe of the model: a "Folded" morph between its extended and folded tips */
+
 interface SensingProbe {
   weights: number[];
   foldedIndex: number;
   extended: Vector3;
   folded: Vector3;
 }
+
 const G_MOON=1.62;
 // Descent: FREE_FALL_S of free fall from V0 (engine off), then the descent engine brakes the
 // lander over BRAKE_S, easing to TOUCHDOWN_SPEED as it reaches the ground (velocity follows
@@ -62,26 +55,18 @@ const up=new Vector3(0,1,0);
 
 export class LandingMission {
   readonly group=new Group();
-  readonly lander:Object3D;
+  readonly lander:Group;
   private environment:DataTexture;
   private surfaces=new Map<MeshStandardMaterial,MeshStandardMaterial>();
   private dust: LandingDust;
-  /** descent engine thrust 0..1 (drives the plume and the dust) */
-  private throttle=0;
-  private plume:Mesh<CylinderGeometry,ShaderMaterial>;
-  /** what the camera looks at: the lander's centre */
   readonly focus=new Vector3();
-  /** the camera for this frame (world position + orientation) */
-  readonly eye=new Vector3();
-  readonly viewRotation=new Quaternion();
   private destination=new Vector3();
   private bed!:LandingBed;
   private dynamics!:LanderDynamics;
   private time=0;
   private accumulator=0;
   private off=false;
-  private touchdownAt=-1;
-  private phase='Final descent';
+  private phase='Free fall';
   private worldPoint=new Vector3();
   private hitLocal=new Vector3();
   private hitInverse=new Quaternion();
@@ -90,19 +75,22 @@ export class LandingMission {
   private firstProbeContact?:number;
   private bearing=0;
   private glideFrom={bearing:0,radius:0,height:0,rotation:new Quaternion()};
-  private glideTo={eye:new Vector3(),rotation:new Quaternion()};
+  readonly eye=new Vector3();
+  readonly viewRotation=new Quaternion();
+  private throttle=0;
+  private plume:Mesh<CylinderGeometry,ShaderMaterial>;
+  private touchdownAt=-1;
   height=0;
   speed=0;
-  view:MissionView='Outside';
-  constructor(assets:Group[],private sun:Vector3,private floor:(x:number,z:number)=>number,
+  view:MissionView='Landing camera';
+  constructor(asset:Group,private sun:Vector3, private floor:(x:number,z:number)=>number,
     private surface:(x:number,z:number)=>number) {
-    this.lander=assets[0].clone(true);
+    this.lander=asset.clone(true);
     this.lander.updateMatrixWorld(true);
     this.environment=this.reflections();
     this.lander.traverse(node=>{
       if(!(node instanceof Mesh))return;
       node.castShadow=node.receiveShadow=true;
-      // the model's surface-sensing probes fold through a "Folded" morph target
       const index=node.morphTargetDictionary?.Folded;
       if(index!==undefined && node.morphTargetInfluences && node.userData.extendedTip && node.userData.foldedTip){
         this.probes.push({
@@ -148,37 +136,38 @@ export class LandingMission {
     }
     const tex=new DataTexture(data,w,h);tex.mapping=EquirectangularReflectionMapping;tex.needsUpdate=true;return tex;
   }
-  /** start the descent onto (x, z) */
   restart(x:number,z:number){
+    this.touchdownAt=-1;this.throttle=0;
+    this.bearing=GLIDE_BEARING-ORBIT_RATE*(DESCENT_S+HOLD_S);
     for(const m of this.surfaces.values())m.envMapIntensity=this.sun.y>0?1.1:.36;
     this.destination.set(x,this.floor(x,z),z);
     this.bed=new LandingBed(this.surface);this.dynamics=new LanderDynamics(this.bed);
-    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dust.reset();this.touchdownAt=-1;this.throttle=0;
+    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dust.reset();
     this.firstProbeContact=undefined;
     for(const probe of this.probes)probe.weights[probe.foldedIndex]=0;
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
-    // orbit so that the glide starts from GLIDE_BEARING if touchdown comes on schedule
-    this.bearing=GLIDE_BEARING-ORBIT_RATE*(DESCENT_S+HOLD_S);
-    this.view='Outside';this.advance(0);
+    this.advance(0);
   }
+  castState() {
+    return [...this.lander.position.toArray(),...this.lander.quaternion.toArray(),this.height,this.throttle,this.time,
+      ...this.probes.map(p=>p.weights[p.foldedIndex])];
+  }
+  applyCastState(state:number[],dt:number) {
+    this.lander.position.fromArray(state);this.lander.quaternion.fromArray(state,3).normalize();
+    this.plume.visible=state[8]>.01;
+    this.plume.material.uniforms.throttle.value=state[8];
+    this.plume.material.uniforms.clock.value=state[9];
+    this.probes.forEach((p,i)=>{p.weights[p.foldedIndex]=state[10+i]??0;});
+    this.dust.update(dt,this.lander.position,this.lander.quaternion,state[7],state[8],this.sun);
+  }
+  get canGuide(){return this.glideProgress<1;}
   get status(){return this.phase;}
   get atRest(){return this.dynamics.settled;}
   get landed(){return this.dynamics.contacted;}
-  get telemetry(){
-    return this.phase+' · '+Math.max(0,this.height).toFixed(this.height<10?1:0)+' m · '+this.speed.toFixed(1)+' m/s';
-  }
-  /**
-   * Seconds since the glide to the astronaut started (0 before), so walk.ts knows when to
-   * take over; the glide lasts GLIDE_S.
-   */
   get glideProgress(){
     if(this.touchdownAt<0)return 0;
     return MathUtils.clamp((this.time-this.touchdownAt-HOLD_S)/GLIDE_S,0,1);
   }
-  /**
-   * Advance by dt. astronautEye / astronautRotation: where the glide ends (the walk's
-   * first-person camera), only read once the glide starts.
-   */
   advance(dt:number,astronautEye?:Vector3,astronautRotation?:Quaternion){
     this.time+=dt;
     const p=this.destination;
@@ -207,7 +196,7 @@ export class LandingMission {
         body.velocity.set(0,-this.speed,0);
       }
     }
-    if(this.off){
+    if(this.off && !this.dynamics.settled){
       const body=this.dynamics;
       this.accumulator+=freeDt;
       while(this.accumulator>=contactStep){body.step(contactStep);this.accumulator-=contactStep;}
@@ -215,8 +204,8 @@ export class LandingMission {
       this.lander.position.set(0,-centreHeight,0).applyQuaternion(body.rotation).add(body.position);
       if(!body.settled)this.foldProbes();
       this.speed=body.velocity.length();this.height=Math.max(0,this.lander.position.y-this.floor(this.lander.position.x,this.lander.position.z));
-      if(this.touchdownAt<0 && this.landed)this.touchdownAt=this.time;
     }
+    if(this.touchdownAt<0 && this.landed)this.touchdownAt=this.time;
     // engine: ignites after the free fall (quick ramp with a startup flicker), cut at contact
     const burning=!this.off && this.time>=FREE_FALL_S;
     if(burning){
@@ -233,15 +222,15 @@ export class LandingMission {
     this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
     this.hitInverse.copy(this.lander.quaternion).invert();
     this.dust.update(dt, this.lander.position, this.lander.quaternion, this.height,
-      this.off ? 0 : this.throttle, this.sun.y);
-    this.frameCamera(dt,astronautEye,astronautRotation);
+      this.off ? 0 : this.throttle, this.sun);
+    if(this.view==='Landing camera')this.frameCamera(dt,astronautEye,astronautRotation);
   }
   /**
    * Top (walk-scene y) of the lander's walking hitbox over (x, z), or -Infinity off it. Feeds
    * the gait's support, so the hull and legs act as walls and the footpads as steps.
    */
   obstacleTop(x:number,z:number){
-    if(!this.group.visible)return -Infinity;
+    if(!this.landed || !this.group.visible || !this.lander.visible)return -Infinity;
     const p=this.hitLocal.set(x-this.lander.position.x,0,z-this.lander.position.z).applyQuaternion(this.hitInverse);
     const ax=Math.abs(p.x),az=Math.abs(p.z),base=this.lander.position.y;
     // descent stage: an octagon (square with its corners cut)
@@ -254,12 +243,10 @@ export class LandingMission {
     if(Math.hypot(along-padRadius,across)<=PAD_R)return base+PAD_TOP;
     return -Infinity;
   }
-  /** height of a lander-local point above the soil under it */
   private clearance(local:Vector3){
     const p=this.worldPoint.copy(local).applyQuaternion(this.lander.quaternion).add(this.lander.position);
     return p.y-this.bed.at(p.x,p.z);
   }
-  /** fold each probe that reaches the soil just enough to rest on it (they stay bent) */
   private foldProbes(){
     for(const probe of this.probes){
       let low=probe.weights[probe.foldedIndex], high=1;
@@ -267,6 +254,7 @@ export class LandingMission {
       const tip=this.probeTip.lerpVectors(probe.extended,probe.folded,low);
       if(this.clearance(tip)>0)continue;
       this.firstProbeContact??=this.time;
+      // Landed probes stay bent. Resolve each tip against the soil under that leg.
       if(this.clearance(probe.folded)>0){
         for(let i=0;i<8;i++){
           const mid=(low+high)/2;
@@ -277,10 +265,10 @@ export class LandingMission {
       probe.weights[probe.foldedIndex]=high;
     }
   }
-  /** engine cutoff: a second after the first probe touches, or at once if pads or bell touch */
   private shouldCutOff(){
     this.foldProbes();
-    if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=CONTACT_RESPONSE_S)return true;
+    // The Apollo press kit allows one second for the crew to respond to the contact light.
+    if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=1)return true;
     return solidContacts.some(local=>this.clearance(local)<=0);
   }
 
@@ -300,9 +288,7 @@ export class LandingMission {
     }
     // the glide: around the lander (bearing / distance / height), not straight through it
     const e=MathUtils.smootherstep(g,0,1);
-    const to=this.glideTo;
-    to.eye.copy(astronautEye);to.rotation.copy(astronautRotation);
-    const dx=to.eye.x-this.focus.x,dz=to.eye.z-this.focus.z;
+    const dx=astronautEye.x-this.focus.x,dz=astronautEye.z-this.focus.z;
     let toBearing=Math.atan2(dx,dz);
     const from=this.glideFrom;
     while(toBearing-from.bearing>Math.PI)toBearing-=2*Math.PI;
@@ -310,9 +296,9 @@ export class LandingMission {
     const bearing=MathUtils.lerp(from.bearing,toBearing,e);
     const radius=MathUtils.lerp(from.radius,Math.hypot(dx,dz),e);
     this.eye.set(Math.sin(bearing)*radius,0,Math.cos(bearing)*radius).add(this.focus);
-    this.eye.y=MathUtils.lerp(from.height,to.eye.y,e);
-    if(g>=1)this.eye.copy(to.eye);
-    this.viewRotation.slerpQuaternions(from.rotation,to.rotation,e);
+    this.eye.y=MathUtils.lerp(from.height,astronautEye.y,e);
+    if(g>=1)this.eye.copy(astronautEye);
+    this.viewRotation.slerpQuaternions(from.rotation,astronautRotation,e);
   }
   private right=new Vector3(1,0,0);
   private cameraPitch=new Quaternion();
@@ -322,9 +308,9 @@ export class LandingMission {
       this.cameraPitch.setFromAxisAngle(this.right,-Math.atan2(dy,Math.hypot(dx,dz))));
   }
   dispose(){
-    // GLTF geometry and textures belong to the shared model cache.
-    this.environment.dispose();for(const m of this.surfaces.values())m.dispose();
     this.plume.geometry.dispose();this.plume.material.dispose();
+    // The shared GLTF owns the geometry and maps. Each mission owns its reflective materials.
+    this.environment.dispose();for(const m of this.surfaces.values())m.dispose();
     this.dust.dispose();this.group.removeFromParent();
   }
 }

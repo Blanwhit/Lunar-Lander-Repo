@@ -12,6 +12,7 @@ export class VrFeasibility {
   private readonly atlas: DataArrayTexture;
   private readonly layers: { level:number; face:number; x:number; y:number; source?:DataTexture; version:number }[] = [];
   private readonly visible = {value:false};
+  private readonly tintStrength = {value:0.72};
   private nextRefresh = 0;
 
   constructor(readonly overlay: FeasibilityOverlay, readonly toggle: () => void) {
@@ -36,6 +37,7 @@ export class VrFeasibility {
       compile.call(material,shader,renderer);
       shader.uniforms.vrScoreAtlas={value:this.atlas};
       shader.uniforms.vrHeatEnabled=this.visible;
+      shader.uniforms.vrHeatStrength=this.tintStrength;
       shader.vertexShader='varying vec3 vScoreDirection;\n'+shader.vertexShader.replace('#include <begin_vertex>',
         '#include <begin_vertex>\n vScoreDirection='+bodyDirection+';');
       shader.fragmentShader=heatmapShader(this.overlay.meta.samples,this.level)+shader.fragmentShader.replace(
@@ -44,7 +46,8 @@ export class VrFeasibility {
     };
   }
 
-  update(time:number) {
+  update(time:number, immersive:boolean) {
+    this.tintStrength.value=immersive ? 0.55 : 0.72;
     this.visible.value=this.overlay.enabled;
     if(!this.visible.value){this.nextRefresh=0;return;}
     if(time<this.nextRefresh)return;
@@ -96,6 +99,7 @@ function heatmapShader(samples:number,level:number){
     varying vec3 vScoreDirection;
     uniform highp sampler2DArray vrScoreAtlas;
     uniform bool vrHeatEnabled;
+    uniform float vrHeatStrength;
     vec2 scoreLayer(vec2 uv, float layer){
       return texture(vrScoreAtlas,vec3((uv*${(samples-1).toFixed(1)}+.5)/${samples.toFixed(1)},layer)).rg;
     }
@@ -117,7 +121,7 @@ function heatmapShader(samples:number,level:number){
       if(sc.g<.5)return base;
       vec3 red=vec3(.86,.12,.09),yellow=vec3(.98,.84,.16),green=vec3(.13,.70,.27);
       vec3 ramp=sc.r<.5?mix(red,yellow,2.*sc.r):mix(yellow,green,2.*sc.r-1.);
-      return mix(base,pow(ramp,vec3(2.2)),.72);
+      return mix(base,pow(ramp,vec3(2.2)),vrHeatStrength);
     }
   `;
 }

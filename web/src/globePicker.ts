@@ -1,208 +1,174 @@
+import { sendCastFrame } from './castLink';
 import {
-  BufferGeometry, CanvasTexture, Group, Line, LineBasicMaterial, MathUtils, Mesh,
-  MeshBasicMaterial, PerspectiveCamera, PlaneGeometry, Ray, Scene, Sphere,
-  SphereGeometry, SRGBColorSpace, TextureLoader, Vector3, WebGLRenderer,
+  CanvasTexture, PlaneGeometry, Matrix3, Matrix4, Mesh, MeshBasicMaterial, PerspectiveCamera, Quaternion, Scene,
+  SphereGeometry, Vector3, Vector4, WebGLRenderer,
 } from 'three';
-
-import { VrHudButton, VrHudPointers } from './overlay/vrHudButton';
+import type { ControlsState } from './controls';
+import { VrPointers } from './vrPointers';
+import type { Listen, SurfacePoint, Visit } from './questHandoff';
 import type { VrFeasibility } from './overlay/vrFeasibility';
 
 export interface GlobeHeadset {
   renderer: WebGLRenderer;
   session: XRSession;
   reference: XRReferenceSpaceType;
+  listen?: Listen;
 }
 
-/** Both the controller pose and the globe are in the session's reference space. */
-export async function pickLandingInVR(session: XRSession, latitude: number, longitude: number,
-  land: (lat: number, lon: number, headset: GlobeHeadset) => Promise<void>, scores?: VrFeasibility) {
-  const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6));
-  renderer.setSize(innerWidth, innerHeight, false);
-  renderer.xr.enabled = true;
-  let handedOff = false;
+export interface GlobeEye extends ControlsState {
+  projection: Float32Array;
+  width: number;
+  height: number;
+  renderer: WebGLRenderer;
+  firstEye: boolean;
+  expandedCast?: boolean;
+}
+
+export interface BrowserGlobe {
+  active(renderer: WebGLRenderer | null): void;
+  navigate(dt: number, horizontal: number, vertical: number, zoom: number): ControlsState;
+  pick(origin: Vector3, direction: Vector3): Vector3 | null;
+  draw(eye: GlobeEye, dt: number): void;
+}
+
+/** The session is requested from the headset button's click, before pairing or loading terrain. */
+export async function openSurfaceVR(session: XRSession, start:(headset:GlobeHeadset)=>Promise<void>) {
+  const renderer = new WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+  renderer.xr.enabled=true;
+  const scene=new Scene(), camera=new PerspectiveCamera(60,1,.02,10);
+  const card=document.createElement('canvas');card.width=512;card.height=64;
+  const ctx=card.getContext('2d')!;ctx.fillStyle='white';ctx.font='27px system-ui';
+  ctx.textAlign='center';ctx.fillText('Loading lunar surface…',256,43);
+  const texture=new CanvasTexture(card);
+  const label=new Mesh(new PlaneGeometry(.72,.09),new MeshBasicMaterial({map:texture,transparent:true}));
+  scene.add(label);
+  let transferred=false;
   try {
-    let reference: XRReferenceSpaceType = 'local-floor';
-    try { await session.requestReferenceSpace(reference); } catch { reference = 'local'; }
+    let reference: XRReferenceSpaceType='local-floor';
+    try{await session.requestReferenceSpace(reference);}catch{reference='local';}
     renderer.xr.setReferenceSpaceType(reference);
     await renderer.xr.setSession(session);
-    handedOff = await showLandingGlobe(renderer, session, latitude, longitude,
-      (lat, lon) => land(lat, lon, { renderer, session, reference }), scores);
+    renderer.setAnimationLoop((_time,frame)=>{
+      const space=renderer.xr.getReferenceSpace();
+      const pose=space && frame?.getViewerPose(space);
+      if(!pose)return;
+      label.quaternion.copy(pose.transform.orientation);
+      label.position.set(0,0,-1.6).applyQuaternion(label.quaternion).add(pose.transform.position);
+      renderer.render(scene,camera);
+    });
+    await start({renderer,session,reference});
+    transferred=true;
   } finally {
-    if (!handedOff) {
-      renderer.setAnimationLoop(null);
-      renderer.dispose();
-      renderer.forceContextLoss();
-    }
+    if(!transferred){renderer.setAnimationLoop(null);await session.end().catch(()=>{});renderer.dispose();renderer.forceContextLoss();}
+    label.geometry.dispose();label.material.dispose();texture.dispose();
   }
 }
 
-export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSession,
-  latitude: number, longitude: number, land: (lat: number, lon: number) => Promise<boolean | void>, scores?: VrFeasibility) {
-  const scene = new Scene(), camera = new PerspectiveCamera(65, 1, .025, 10);
-  const scoreButton = scores && VrHudButton.feasibility(scores);
-  if (scoreButton) scene.add(scoreButton.mesh);
-  const stand = new Group();
-  scene.add(stand);
-  const map = new TextureLoader().load(import.meta.env.BASE_URL + 'lunar-soil/global-albedo.jpg');
-  map.colorSpace = SRGBColorSpace;
-  const radius = .40;
-  const moon = new Mesh(new SphereGeometry(radius, 96, 64), new MeshBasicMaterial({ map }));
-  moon.rotation.set(MathUtils.degToRad(latitude), -Math.PI / 2 - MathUtils.degToRad(longitude), 0);
-  stand.add(moon);
-  scores?.applyTo(moon.material,'vec3(position.x,-position.z,position.y)');
-  const dot = new Mesh(new SphereGeometry(.008, 12, 8), new MeshBasicMaterial({ color: 0x6be8ff }));
-  const beam = new Line(new BufferGeometry().setFromPoints([new Vector3(), new Vector3()]),
-    new LineBasicMaterial({ color: 0x7ecbda }));
-  scene.add(dot, beam);
-  dot.visible = beam.visible = false;
-
-  const card = document.createElement('canvas');
-  card.width = 1024;
-  card.height = 198;
-  const ctx = card.getContext('2d')!;
-  const text = new CanvasTexture(card);
-  text.colorSpace = SRGBColorSpace;
-  const label = new Mesh(new PlaneGeometry(1.24, .24), new MeshBasicMaterial({ map: text, transparent: true }));
-  label.position.set(0, -.56, 0);
-  stand.add(label);
-  let lastCaption = '';
-  function caption(title: string, detail: string, hint = '') {
-    const key = title + detail + hint;
-    if (lastCaption === key) return;
-    lastCaption = key;
-    ctx.clearRect(0, 0, card.width, card.height);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'white';
-    ctx.font = '600 50px system-ui';
-    ctx.fillText(title, 512, 58);
-    ctx.fillStyle = '#c6d4dd';
-    ctx.font = '32px system-ui';
-    ctx.fillText(detail, 512, 112);
-    ctx.fillStyle = '#adbec9';
-    ctx.font = '28px system-ui';
-    ctx.fillText(hint, 512, 165, 990);
-    text.needsUpdate = true;
-  }
-  const controls = 'Left stick rotates · X lands · Y returns from the surface';
-  caption('Point with your left controller', controls);
-
-  let selected = false, landingFailed = false;
-  function release() {
-    scoreButton?.dispose();
-    moon.geometry.dispose(); moon.material.dispose(); map.dispose();
-    dot.geometry.dispose(); dot.material.dispose();
-    beam.geometry.dispose(); beam.material.dispose();
-    label.geometry.dispose(); label.material.dispose(); text.dispose();
-  }
+export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSession, globe: BrowserGlobe,
+  land: (lat: number, lon: number) => Promise<boolean | void>, scores?: VrFeasibility, listen?: Listen) {
+  const hud = new Scene(), camera = new PerspectiveCamera(65, 1, .025, 10);
+  const pointers = new VrPointers();
+  let preparing=false;
+  const visit: Visit = async ({lat,lon}:SurfacePoint) => {
+    if(preparing)return false;
+    preparing=true;
+    try{
+      const ok = (await land(lat,lon)) !== false;
+      if(ok)finish(true);
+      return ok;
+    } finally {preparing=false;}
+  };
+  const dot = new Mesh(new SphereGeometry(.005, 8, 6), new MeshBasicMaterial({color:0x9beaff,depthTest:false}));
+  hud.add(dot);
+  const anchor = new Vector3(), initialHead = new Quaternion(), orientation = new Quaternion();
+  const trackingToBody = new Matrix3(), rotation = new Matrix4();
+  const origin = new Vector3(), direction = new Vector3();
+  const viewport = new Vector4(), scissor = new Vector4();
+  let anchored = false, lastTime = 0, finish!: (ok: boolean) => void;
+  const ended = () => finish(false);
+  const result = new Promise<boolean>(resolve => { finish = resolve; });
+  session.addEventListener('end', ended, {once:true});
+  globe.active(renderer);
+  listen?.(visit);
   try {
-    const bounds = new Sphere(new Vector3(), radius);
-    const local = new Vector3();
-    const ray = new Ray(), hit = new Vector3(), forward = new Vector3();
-    const pointers = new VrHudPointers();
-    let anchored = false, lastTime = 0;
-    return await new Promise<boolean>((resolve, reject) => {
-      let finished = false;
-      const ended = () => { finished = true; if (!selected) resolve(false); };
-      session.addEventListener('end', ended, { once: true });
-      renderer.setAnimationLoop((time, frame) => {
-        const space = renderer.xr.getReferenceSpace();
-        if (!space || !frame) return;
-        const pose = frame.getViewerPose(space);
-        if (!pose || session.visibilityState !== 'visible') {
-          scoreButton?.hide();
-          pointers.reset();
-          dot.visible = beam.visible = false;
-          return;
+    renderer.setAnimationLoop((time, frame) => {
+      const space = renderer.xr.getReferenceSpace();
+      if (!frame || !space) return;
+      const pose = frame.getViewerPose(space);
+      if (!pose || session.visibilityState !== 'visible') { pointers.reset(); return; }
+      const dt = lastTime ? Math.min(.1, (time-lastTime)/1000) : 0;
+      lastTime = time;
+      if (!anchored) {
+        anchor.copy(pose.transform.position);
+        initialHead.copy(pose.transform.orientation).invert();
+        anchored = true;
+      }
+      pointers.update(session,frame,space);
+      const left = pointers.left.source?.gamepad, right = pointers.right.source?.gamepad;
+      const axis = (n = 0) => Math.abs(n) > .15 && !preparing ? n : 0;
+      const state = globe.navigate(dt,axis(left?.axes[2]),axis(left?.axes[3]),axis(right?.axes[3]));
+      // The first headset pose looks along the desktop camera. Later poses are relative to it.
+      trackingToBody.copy(state.viewRot).transpose().multiply(
+        new Matrix3().setFromMatrix4(rotation.makeRotationFromQuaternion(initialHead)));
+      const positionInBody = (p: DOMPointReadOnly) =>
+        origin.copy(p).sub(anchor).applyMatrix3(trackingToBody).add(new Vector3(...state.camPos));
+
+      dot.visible = false;
+      for (const hand of pointers.hands) {
+        const aim = hand.aim;
+        if (!aim) continue;
+        direction.set(0,0,-1).applyQuaternion(aim.transform.orientation);
+        const hit = globe.pick(positionInBody(aim.transform.position), direction.applyMatrix3(trackingToBody));
+        if (!hit) continue;
+        dot.position.set(0,0,-.85).applyQuaternion(aim.transform.orientation).add(aim.transform.position);
+        dot.visible = true;
+        hit.normalize();
+        if (hand.faceClick && !preparing) {
+          void visit({lat:Math.asin(hit.z)*180/Math.PI,lon:Math.atan2(hit.y,hit.x)*180/Math.PI})
+            .catch(error=>console.warn('Surface travel failed',error));
         }
-        if (!anchored) {
-          forward.set(0, 0, -1).applyQuaternion(pose.transform.orientation);
-          forward.y = 0;
-          if (forward.lengthSq() < .01) forward.set(0, 0, -1);
-          forward.normalize();
-          stand.position.copy(pose.transform.position).addScaledVector(forward, 1.4);
-          stand.position.y -= .08;
-          stand.rotation.y = Math.atan2(-forward.x, -forward.z);
-          bounds.center.copy(stand.position);
-          anchored = true;
+        if (hand.faceClick || !pointers.right.faceClick) break;
+      }
+      scores?.update(time,true);
+
+      // Orbital terrain uses camera-relative doubles and its own projection uniforms. Draw
+      // that same renderer into each XR viewport, then composite the controller HUD in metres.
+      const eyes = renderer.xr.getCamera().cameras;
+      renderer.getViewport(viewport);
+      renderer.getScissor(scissor);
+      const wasScissored = renderer.getScissorTest(), autoClear = renderer.autoClear;
+      renderer.xr.enabled = false;
+      try {
+        renderer.setScissorTest(true);
+        renderer.autoClear = true;
+        for (const [i,view] of pose.views.entries()) {
+          const rect = eyes[i]?.viewport;
+          if (!rect) continue;
+          renderer.setViewport(rect); renderer.setScissor(rect);
+          const p = positionInBody(view.transform.position);
+          const bodyToEye = new Matrix3().setFromMatrix4(rotation.makeRotationFromQuaternion(
+            orientation.copy(view.transform.orientation))).premultiply(trackingToBody).transpose();
+          if(i===0)sendCastFrame(time,()=>({
+            mode:'globe',time,heat:!!scores?.overlay.enabled,pivot:[...state.pivot],
+            head:[...p.toArray(),...new Quaternion().setFromRotationMatrix(new Matrix4().setFromMatrix3(bodyToEye).transpose()).toArray()],
+            fov:2*Math.atan(1/view.projectionMatrix[5])*180/Math.PI,
+            pointer:dot.visible?dot.position.clone().sub(anchor).applyMatrix3(trackingToBody).add(new Vector3(...state.camPos)).toArray():undefined,
+          }));
+          globe.draw({renderer,camPos:[p.x,p.y,p.z],pivot:state.pivot,viewRot:bodyToEye,
+            projection:view.projectionMatrix,width:rect.z,height:rect.w,firstEye:i===0}, dt/pose.views.length);
         }
-        const dt = MathUtils.clamp((time - lastTime) / 1000, 0, .05);
-        lastTime = time;
-        if (!selected) {
-          let title = 'Point with your left controller';
-          pointers.update(session, frame, space);
-          const left = pointers.left;
-          const pad = left.source?.gamepad;
-          const x = pad?.axes[2] ?? 0, y = pad?.axes[3] ?? 0;
-          if (Math.abs(x) > .15) moon.rotation.y += x * dt * 1.6;
-          if (Math.abs(y) > .15) moon.rotation.x = MathUtils.clamp(moon.rotation.x + y * dt * 1.6, -Math.PI / 2, Math.PI / 2);
-          const uiClick = scoreButton?.update(pose, pointers);
-          // X selects with the left hand; either hand can inspect a score.
-          let pointed = false;
-          beam.visible = dot.visible = false;
-          for (const hand of pointers.hands) {
-            const aim = hand.aim;
-            if (!aim || hand.overButton || (hand !== left && !scores?.overlay.enabled)) continue;
-            ray.origin.copy(aim.transform.position);
-            ray.direction.set(0, 0, -1).applyQuaternion(aim.transform.orientation);
-            const onMoon = ray.intersectSphere(bounds, hit);
-            if (!onMoon && hand !== left) continue;
-            beam.visible = true;
-            if (onMoon) {
-              dot.position.copy(hit);
-              dot.visible = true;
-            } else ray.at(2, hit);
-            const line = beam.geometry.getAttribute('position');
-            line.setXYZ(0, ray.origin.x, ray.origin.y, ray.origin.z);
-            line.setXYZ(1, hit.x, hit.y, hit.z);
-            line.needsUpdate = true;
-            beam.frustumCulled = false;
-            if (!onMoon) continue;
-            pointed = true;
-            const click = hand === left && left.faceClick && !uiClick;
-            moon.worldToLocal(local.copy(hit)).normalize();
-            if (scores?.overlay.enabled) title = scores.reading([local.x,-local.z,local.y]);
-            if (click) {
-              selected = true;
-              scoreButton?.hide();
-              landingFailed = false;
-              const lat = MathUtils.radToDeg(Math.asin(MathUtils.clamp(local.y, -1, 1)));
-              const lon = MathUtils.radToDeg(Math.atan2(-local.z, local.x));
-              caption('Preparing landing', Math.abs(lat).toFixed(3) + '° ' + (lat < 0 ? 'S' : 'N')
-                + '    ' + Math.abs(lon).toFixed(3) + '° ' + (lon < 0 ? 'W' : 'E'));
-              beam.visible = false;
-              void land(lat, lon).then(result => {
-                if (result === false && !finished) {
-                  landingFailed = true;
-                  selected = false;
-                } else {
-                  session.removeEventListener('end', ended);
-                  resolve(result !== false);
-                }
-              }, error => {
-                session.removeEventListener('end', ended);
-                reject(error);
-              });
-            }
-            break;
-          }
-          if (scores?.overlay.enabled && !selected) {
-            if (!pointed) {
-              // While pointing at a HUD button, report the point facing the viewer.
-              local.copy(pose.transform.position).sub(bounds.center).setLength(radius).add(bounds.center);
-              moon.worldToLocal(local).normalize();
-              title = scores.reading([local.x,-local.z,local.y], 'Globe centre');
-            }
-            scoreButton?.setDetail(title);
-          } else scoreButton?.setDetail('');
-          if (!selected) caption(title, landingFailed ? 'Terrain could not load · Press X to try again' : controls, scores?.overlay.enabled
-            ? 'Red 0% · Yellow 50% · Green 100%' : '');
-        }
-        scores?.update(time);
-        renderer.render(scene, camera);
-      });
+      } finally {
+        renderer.xr.enabled = true;
+        renderer.setScissor(scissor); renderer.setScissorTest(wasScissored);
+        renderer.setViewport(viewport);
+        renderer.autoClear = false;
+        try { renderer.render(hud,camera); } finally {renderer.autoClear = autoClear;}
+      }
     });
+    return await result;
   } finally {
-    release();
+    globe.active(null);
+    session.removeEventListener('end',ended);
+    dot.geometry.dispose();dot.material.dispose();
   }
 }

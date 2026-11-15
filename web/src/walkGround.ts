@@ -81,7 +81,7 @@ export class WalkGround {
   constructor(private readonly height: (x: number, z: number) => number,
     private readonly seed: number, private readonly rocky = 1, private readonly samples: RockSample[] = [],
     private readonly soil?: SoilMaps, landingToBody = new Matrix4(),
-    private readonly field?: BoulderField, scores?:VrFeasibility) {
+    private readonly field?: BoulderField, scores?:VrFeasibility,private readonly spectator=false) {
     soilUV(0, 0, this.coords);
     this.originRelief = soil ? scanHeight(soil, this.coords) : 0;
     this.dust = soil ? groundMaterial(soil, landingToBody, scores) : new MeshStandardMaterial({ vertexColors: true, roughness: 1 });
@@ -90,7 +90,7 @@ export class WalkGround {
       // More samples per ring at landscape scale keep distant ridgelines resolved.
       // Keep a detailed walking area around each landing. Finer soil relief is
       // sampled in the material at every location, independent of this spacing.
-      const halfGrid = level < 3 ? 32 : 64;
+      const halfGrid = level < 3 || spectator ? 32 : 64;
       const step = CELL * 16 * 2 ** level / halfGrid;
       const mesh = new Mesh(new BufferGeometry(), this.dust);
       mesh.receiveShadow = true;
@@ -114,7 +114,8 @@ export class WalkGround {
       const batches = variants.map(levels => levels.map((model, lod) => {
         const mesh = new InstancedMesh(model.geometry, model.material, this.field && i >= 3 ? maxVisiblePerBand : width * width);
         mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-        mesh.castShadow = mesh.receiveShadow = i >= 2 && lod !== 2;
+        mesh.receiveShadow = true;
+        mesh.castShadow = i >= 2 && lod !== 2;
         mesh.count = 0;
         this.group.add(mesh);
         return mesh;
@@ -387,6 +388,9 @@ export class WalkGround {
   private scatter(band: StoneBand, layer: number): void {
     const { spread, batches, cx, cz, viewX, viewZ } = band;
     const seed = this.seedFor(layer);
+    // A 4,200-triangle scan and a 420-triangle scan share the same photographed texture.
+    const near=this.spectator ? .12 : .055;
+    const mid=this.spectator ? .02 : .009;
     for (const levels of batches) for (const mesh of levels) mesh.count = 0;
     const draw = (rock: { x: number; z: number; diameter: number }, i: number, j: number) => {
       if ((layer === 1 || layer === 2) && this.liftedStones.size && this.liftedStones.has(layer + '/' + i + '/' + j)) return;
@@ -396,7 +400,7 @@ export class WalkGround {
       if (range > spread.radius || (layer >= 3 && apparent < 0.0016)) return;
       const specimen = Math.floor(hash(i, j, seed + 74) * batches.length);
       const levels = batches[specimen];
-      const mesh = levels.length === 1 ? levels[0] : levels[apparent > 0.055 ? 0 : apparent > 0.009 ? 1 : 2];
+      const mesh = levels.length === 1 ? levels[0] : levels[apparent > near ? 0 : apparent > mid ? 1 : 2];
       this.placeRock(i, j, seed, rock, levels[0]);
       const index = mesh.count++;
       mesh.setMatrixAt(index, this.stamp.matrix);

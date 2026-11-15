@@ -48,12 +48,12 @@ const HEIGHT_BYTES = GRID * GRID * 2;
 const NORMAL_BYTES = Math.round((TILE_N + 1) * (TILE_N + 1) * 4 * 1.34);
 const COLOUR_BYTES = Math.round(256 * 256 * 1 * 1.34);
 
-let geometryCache: BufferGeometry | null = null;
+const geometryCache=new Map<number,BufferGeometry>();
 
 /** shared tile mesh: (MESH_N+1)^2 grid + skirts on all 4 edges */
-function tileGeometry(): BufferGeometry {
-  if (geometryCache) return geometryCache;
-  const M = MESH_N;
+function tileGeometry(M=MESH_N): BufferGeometry {
+  const cached=geometryCache.get(M);
+  if(cached)return cached;
   const V = M + 1;
   const verts: number[] = [];
   for (let j = 0; j <= M; j++) for (let i = 0; i <= M; i++) verts.push(i, j, 0);
@@ -89,7 +89,7 @@ function tileGeometry(): BufferGeometry {
   geo.setAttribute('grid', new BufferAttribute(new Float32Array(verts), 3));
   geo.setIndex(new BufferAttribute(new Uint16Array(idx), 1));
   geo.boundingSphere = new Sphere(new Vector3(), 1e12);
-  geometryCache = geo;
+  geometryCache.set(M,geo);
   return geo;
 }
 
@@ -296,8 +296,8 @@ export class TileTree {
     return Math.max((P * t) / this.opts.pixelsPerTexel, 2.5 * TILE_N * Math.SQRT2 * t);
   }
 
-  update(fi: FrameInfo, moving = false): TileNode[] {
-    this.drainArrivals(moving);
+  update(fi: FrameInfo, moving = false, firstView = true): TileNode[] {
+    if (firstView) this.drainArrivals(moving);
     const P = fi.viewportHeight / (2 * Math.tan(fi.fovY / 2));
     this.tmpM.setFromMatrix3(fi.viewRot);
     this.tmpM.premultiply(fi.proj);
@@ -575,7 +575,8 @@ export class TileTree {
     return { tex: a.colourTex!, scale, ou: (n.x & m) * scale, ov: (n.y & m) * scale };
   }
 
-  meshFor(n: TileNode, fi: FrameInfo, P: number, light: Vector3, lightParams: LightParams): Mesh {
+  meshFor(n: TileNode, fi: FrameInfo, P: number, light: Vector3, lightParams: LightParams, heatStrength = .72, gridSize=MESH_N): Mesh {
+    const cells=Math.min(MESH_N,gridSize);
     if (!n.mesh) {
       const F = FACES[n.face];
       const mat = new RawShaderMaterial({
@@ -616,14 +617,17 @@ export class TileTree {
           uFeas: { value: this.fallbackColour },
           uFeasXf: { value: new Vector3(1, 0, 0) },
           uFeasOn: { value: 0 },
+          uHeatStrength: { value: .72 },
           uFeasN: { value: 64 },
         },
       });
-      n.mesh = new Mesh(tileGeometry(), mat);
+      n.mesh = new Mesh(tileGeometry(cells), mat);
       n.mesh.frustumCulled = false;
       n.mesh.matrixAutoUpdate = false;
     }
     const u = (n.mesh.material as RawShaderMaterial).uniforms;
+    n.mesh.geometry=tileGeometry(cells);
+    u.uTile.value[3]=cells;
     u.uProj.value.copy(fi.proj);
     u.uViewRot.value.copy(fi.viewRot);
     // origin relative to camera, float64 subtraction
@@ -654,6 +658,7 @@ export class TileTree {
       u.uDustOrigin.value.set(fi.camPos[0] % 4096, fi.camPos[1] % 4096, fi.camPos[2] % 4096);
     }
     const fz = this.feasProvider ? this.feasProvider(n.level, n.face, n.x, n.y) : null;
+    u.uHeatStrength.value = heatStrength;
     u.uFeasOn.value = fz ? 1 : 0;
     if (fz) {
       u.uFeas.value = fz.tex;

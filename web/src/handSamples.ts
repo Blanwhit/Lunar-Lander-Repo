@@ -40,6 +40,11 @@ export class HandSamples {
   private readonly contact = new Vector3();
   private readonly slide = new Vector3();
 
+  castState() {
+    return this.stones.slice(-12).map(({mesh,key})=>{
+      mesh.updateMatrix();return {key,matrix:mesh.matrix.toArray()};
+    });
+  }
   get inspection() { return this.lastKey ? specimenInfo[this.lastKey] : undefined; }
 
   private pick(ground: WalkGround, hand: Vector3, rotation: Quaternion) {

@@ -215,6 +215,18 @@ export class GlobeControls {
     this.changed = true;
   };
 
+  navigateVR(dt: number, horizontal: number, vertical: number, zoom: number) {
+    if (horizontal || vertical) {
+      this.flyGoal = null;
+      const move = this.fwd.clone().cross(this.tgt).multiplyScalar(horizontal).addScaledVector(this.fwd, -vertical);
+      const angle = move.length() * Math.min(1.5, this.dist / R_MOON) * dt;
+      this.rotateTarget(this.tgt.clone().cross(move).normalize(), angle);
+    }
+    if (zoom) this.zoomBy(zoom * dt * 1.8);
+    this.update(dt);
+    return this.state();
+  }
+
   private zoomBy(delta: number) {
     this.logDistGoal += delta;
     this.logDistGoal = Math.min(Math.log(this.maxDist), Math.max(Math.log(this.minDist), this.logDistGoal));

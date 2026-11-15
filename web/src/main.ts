@@ -1,3 +1,6 @@
+import {backgroundRenderDue} from './castPresentation';
+import { mountCastPanel } from './castPanel';
+import { QuestHandoff, receiveQuest, savedComputer, type QuestConnection, type SurfacePoint } from './questHandoff';
 import {
   BufferAttribute,
   BufferGeometry,
@@ -20,7 +23,7 @@ import {
 } from 'three';
 import type { OrbitalRocks } from './terrain/orbitalRocks';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
-import { pickLandingInVR, type GlobeHeadset } from './globePicker';
+import { openSurfaceVR, type BrowserGlobe, type GlobeEye, type GlobeHeadset } from './globePicker';
 import { GlobeControls } from './controls';
 import { HelmetAudio } from './helmetAudio';
 import type { LandingFrame } from './landingFlight';
@@ -127,12 +130,17 @@ async function main() {
     else overlayTimer = window.setTimeout(() => void overlay.setTime(ms), 150);
   };
   if (overlay) overlay.onChange = () => (needsRender = true);
-  hud.onFeasibility = (on) => {
+  const applyFeasibility = (on:boolean) => {
+    hud.setFeasibility(on);
     if (!overlay) return;
     overlay.setEnabled(on);
     tree.feasProvider = on ? (L, f, x, y) => overlay.lookup(L, f, x, y) : null;
     if (on) overlayTime(simMs, true);
     needsRender = true;
+  };
+  hud.onFeasibility=on=>{
+    applyFeasibility(on);
+    if(!openingHeadset && !receivingQuest) pairing.setFeasibility(on);
   };
   const vrScores = overlay ? new VrFeasibility(overlay, () => hud.setFeasibility(!overlay.enabled, true)) : undefined;
   const compass = new Compass(hud.rightSlot, () => controls.resetNorth());
@@ -242,15 +250,21 @@ async function main() {
     }
     needsRender = true;
   };
-  // the right button only inspects (the globe controls ignore it): every right click
-  // on the canvas picks the spot under the cursor at release
-  let rDown = false;
-  canvas.addEventListener('pointerdown', (e) => {
-    rDown = e.button === 2;
+  // Only a stationary, single-pointer press selects a site; drags and pinches still navigate.
+  let press: {id: number; button: number; x: number; y: number} | undefined;
+  canvas.addEventListener('pointerdown', e => {
+    press = e.isPrimary && (e.button === 0 || e.button === 2) && !e.shiftKey && !e.ctrlKey
+      ? {id:e.pointerId, button:e.button, x:e.clientX, y:e.clientY} : undefined;
   });
-  canvas.addEventListener('pointerup', (e) => {
-    if (e.button !== 2 || !rDown) return;
-    rDown = false;
+  canvas.addEventListener('pointermove', e => {
+    if (press?.id === e.pointerId && Math.hypot(e.clientX-press.x,e.clientY-press.y)>6) press = undefined;
+  });
+  canvas.addEventListener('pointercancel', () => { press = undefined; });
+  canvas.addEventListener('pointerup', e => {
+    const start = press;
+    press = undefined;
+    if (!start || start.id !== e.pointerId || start.button !== e.button ||
+        Math.hypot(e.clientX-start.x,e.clientY-start.y)>6) return;
     const hit = pickSurface(e.clientX, e.clientY);
     if (!hit) return;
     dismissHint();
@@ -260,7 +274,7 @@ async function main() {
       lat: Math.asin(Math.max(-1, Math.min(1, dir.z))) / DEG,
       lon: Math.atan2(dir.y, dir.x) / DEG,
     };
-    controls.flyTo(dir); // pan the picked spot to the view centre
+    controls.flyTo(dir);
     stopSeries();
     graphs.clear();
     popup.show(site.lat, site.lon);
@@ -269,7 +283,7 @@ async function main() {
     needsRender = true;
   });
 
-  // "Enter VR" is the popup's main action. While the popup is read, the whole surface walk for
+  // While the popup is open, prepare the landing scene for
   // that spot is prepared hidden. Closing the popup, picking another spot or changing time discards it.
   interface WalkPrep {
     lat: number; lon: number; ms: number;
@@ -332,7 +346,7 @@ async function main() {
       const walkSite = await siteAt(lat, lon, loadWalkTerrain(lat, lon));
       surfaceStars = walkSite.sky;
       await walk.startWalk(document.body, {
-        ...walkSite, audio: p.audio, headset, vrScores, start, quiet: headset ? undefined : whenQuiet,
+        ...walkSite, audio: p.audio, headset, vrScores, globe: browserGlobe, start, quiet: headset ? undefined : whenQuiet,
         siteAt: (la: number, lo: number) => siteAt(la, lo, loadWalkTerrain(la, lo)),
         onPrepared: ready,
         onArrived: () => {
@@ -378,7 +392,10 @@ async function main() {
     const th = Math.tan(FOV_Y / 2);
     const vd = new Vector3(((2 * px) / w - 1) * th * (w / h), (1 - (2 * py) / h) * th, -1);
     const d = vd.applyMatrix3(st.viewRot.clone().transpose()).normalize();
-    const o = new Vector3(...st.camPos);
+    return intersectTerrain(new Vector3(...st.camPos), d);
+  }
+
+  function intersectTerrain(o: Vector3, d: Vector3): Vector3 | null {
     const b = o.dot(d), oo = o.lengthSq();
     const rOut = R_MOON + H_MAX_GLOBAL, rIn = R_MOON + H_MIN_GLOBAL;
     const discOut = b * b - (oo - rOut * rOut);
@@ -471,6 +488,7 @@ async function main() {
       uInvViewRot: { value: new Matrix3() },
       uBodyToJ2000: { value: moonOrientation.bodyToJ2000(new Date()) },
       uTanHalf: { value: [1, 1] },
+      uEyeOffset: { value: [0, 0] },
       uStars: { value: null as Texture | null },
       uStarGain: { value: 1.0 },
       uSun: { value: [0, 0, 1, 0] },
@@ -582,31 +600,47 @@ async function main() {
   // console / bench hooks (web/bench/bench.js, README "Site API"); step and siteApi are added below
   (window as any).__moon = { tree, controls, renderer };
 
+  let globeImmersive = false;
+  const browserGlobe: BrowserGlobe = {
+    active(headsetRenderer) {
+      globeImmersive = !!headsetRenderer;
+      tree.uploadTexture = texture => (headsetRenderer ?? renderer).initTexture(texture);
+      needsRender = true;
+    },
+    navigate: (dt, x, y, zoom) => controls.navigateVR(dt, x, y, zoom),
+    pick: intersectTerrain,
+    draw: (eye, dt) => renderFrame(dt, true, eye),
+  };
+
+  let lastOrbitDraw=-Infinity;
   function render(now: number) {
     requestAnimationFrame(render);
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
     advanceFlight?.(dt);
-    renderFrame(dt, false);
+    if (!globeImmersive && backgroundRenderDue(now,lastOrbitDraw)){
+      const elapsed=Number.isFinite(lastOrbitDraw)?Math.min(.15,(now-lastOrbitDraw)/1000):dt;
+      renderFrame(elapsed,false);lastOrbitDraw=now;
+    }
     if (flightFrame && drawApproach) drawApproach(flightFrame);
     releaseQuiet();
   }
 
   /** advance controls by dt and draw if anything changed (or when forced) */
-  function renderFrame(dt: number, force: boolean) {
-    if (walking) {
+  function renderFrame(dt: number, force: boolean, eye?: GlobeEye) {
+    if (walking && !eye) {
       poles.hide();
       return;
     }
-    const moved = !landingBusy && controls.update(dt);
-    const fov = 45 * DEG;
+    const moved = !eye && !landingBusy && controls.update(dt);
+    const fov = eye ? 2 * Math.atan(1 / eye.projection[5]) : FOV_Y;
     if (!force && !moved && !needsRender && !controls.isAnimating()) return;
     needsRender = false;
-    frame++;
+    if (!eye || eye.firstEye) frame++;
 
-    const st = controls.state();
-    compass.update(controls.heading());
-    const w = renderer.domElement.width, h = renderer.domElement.height;
+    const st = eye ?? controls.state();
+    if (!eye) compass.update(controls.heading());
+    const w = eye?.width ?? canvas.width, h = eye?.height ?? canvas.height;
     const aspect = w / h;
     const camR = Math.hypot(...st.camPos);
     // dynamic near/far: near ~ fraction of the height above the highest terrain below us
@@ -624,16 +658,25 @@ async function main() {
       0, 0, -1, 0,
     );
 
+    if (eye) {
+      const depthA = proj.elements[10], depthB = proj.elements[14];
+      proj.fromArray(eye.projection);
+      proj.elements[10] = depthA;
+      proj.elements[14] = depthB;
+    }
+
     // LOD is driven by CSS pixels so high-DPI screens don't quadruple the tile count
     // (the extra device pixels still get MSAA + full-resolution normal maps)
-    const lodH = h / renderer.getPixelRatio();
+    const lodH = eye ? h : h / renderer.getPixelRatio();
     const fi: FrameInfo = { camPos: st.camPos, viewRot: st.viewRot, proj, viewportHeight: lodH, fovY: fov, frame };
-    const tiles = tree.update(fi,!!advanceFlight || controls.isAnimating());
+    const tiles = tree.update(fi, !!eye || !!advanceFlight || controls.isAnimating(), !eye || eye.firstEye);
     const P = lodH / (2 * Math.tan(fov / 2));
 
     scene.clear();
     (skyMat.uniforms.uInvViewRot.value as Matrix3).copy(st.viewRot).transpose();
-    skyMat.uniforms.uTanHalf.value = [Math.tan(fov / 2) * aspect, Math.tan(fov / 2)];
+    skyMat.uniforms.uTanHalf.value = [1 / proj.elements[0], 1 / proj.elements[5]];
+    const eyeOffset: [number, number] = [proj.elements[8], proj.elements[9]];
+    skyMat.uniforms.uEyeOffset.value = eyeOffset;
     skyMat.uniforms.uPixelAngle.value = (2 * Math.tan(fov / 2)) / h;
     if (bodiesReady) {
       // directions from the camera (not the Moon's centre): exact parallax near the Moon
@@ -648,15 +691,21 @@ async function main() {
       skyMat.uniforms.uEarth.value = [toEarth.x, toEarth.y, toEarth.z, Math.asin((R_EARTH_KM * 1000) / de)];
       // glare, faded by how much of the disc the terrain / limb leaves visible
       const vis = () => sunVisibleFraction(st.camPos, toSun, sunR, (d) => tree.heightAt(d));
-      const tanHalf: [number, number] = [Math.tan(fov / 2) * aspect, Math.tan(fov / 2)];
-      if (glare.update(st.viewRot, toSun, sunR, vis, tanHalf, (2 * Math.tan(fov / 2)) / h, dt)) needsRender = true;
+      const tanHalf: [number, number] = [1 / proj.elements[0], 1 / proj.elements[5]];
+      if (glare.update(st.viewRot, toSun, sunR, vis, tanHalf, (2 * Math.tan(fov / 2)) / h, dt, eyeOffset)) needsRender = true;
     }
+    // Draw the far-depth sky after opaque ground in the expanded spectator view.
+    skyMat.depthTest=!!eye?.expandedCast;
+    sky.renderOrder=eye?.expandedCast?2e6:0;
     scene.add(sky);
     // scale bar: ground metres per CSS pixel at the view centre (the pivot)
     const pv = st.pivot;
     const dPivot = Math.hypot(st.camPos[0] - pv[0], st.camPos[1] - pv[1], st.camPos[2] - pv[2]);
-    hud.setScale((dPivot * 2 * Math.tan(fov / 2)) / lodH);
-    for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS));
+    if (!eye) hud.setScale((dPivot * 2 * Math.tan(fov / 2)) / lodH);
+    // Orbital relief at this distance is carried primarily by the measured normal maps.
+    // Spend the spectator budget on their screen samples while preserving close terrain.
+    const castGrid=eye?.expandedCast && alt>90000?(alt>700000?16:32):undefined;
+    for (const n of tiles) scene.add(tree.meshFor(n, fi, P, LIGHT, LIGHT_PARAMS, eye ? .55 : .72,castGrid));
     if (dPivot < 6500 && !flightFrame) {
       loadSurfaceDetail();
       if (rocks && !overlay?.enabled) {
@@ -665,12 +714,13 @@ async function main() {
         scene.add(rocks.group);
       }
     }
-    if (flightFrame) poles.hide();
+    if (eye || flightFrame) poles.hide();
     else poles.update(st.camPos, st.viewRot, proj, canvas.clientWidth, canvas.clientHeight,
       (sign) => tree.heightAt([0, 0, sign]) ?? 0);
     if (bodiesReady && glare.mesh.visible) scene.add(glare.mesh);
     overlay?.endFrame();
-    renderer.render(scene, dummyCam);
+    (eye?.renderer ?? renderer).render(scene, dummyCam);
+    if (eye) return;
     // keep the site popup attached to its surface point
     if (site) {
       const v = site.pos.clone().sub(new Vector3(...st.camPos)).applyMatrix3(st.viewRot);
@@ -686,49 +736,79 @@ async function main() {
   hud.setTime(simMs);
   void setTime(simMs);
   onHash();
-  // ---- "Enter VR" (site popup): fly down to the inspected spot and open the surface walk
-  // (desktop preview first; the headset session is requested from inside the walk)
+  // Land uses the inspected point for the browser and the Quest handoff.
   let landingBusy = false;
   const showOrbit = (visible: boolean) => {
     hud.root.style.opacity = visible ? '' : '0';
     hud.root.inert = !visible;
   };
-  popup.onEnterVR = () => {
-    if (!site || landingBusy) return;
-    void enterVR(site.lat, site.lon);
-  };
   const pickerButton = document.createElement('button');
   pickerButton.type = 'button';
   pickerButton.className = 'moon-feas';
-  pickerButton.textContent = 'Choose landing in VR';
-  if (navigator.xr) {
-    const updatePicker = async () => {
-      try {
-        if (await navigator.xr!.isSessionSupported('immersive-vr')) {
-          hud.root.querySelector('.moon-centre')?.append(pickerButton);
-        } else pickerButton.remove();
-      } catch { pickerButton.remove(); }
-    };
-    void updatePicker();
-    navigator.xr.addEventListener('devicechange', updatePicker);
-    pickerButton.onclick = async () => {
-      if (landingBusy || pickerButton.disabled) return;
-      pickerButton.disabled = true;
-      let session: XRSession | undefined;
-      try {
-        session = await navigator.xr!.requestSession('immersive-vr', { optionalFeatures: ['local-floor'] });
-        const direction = controls.tgt;
-        await pickLandingInVR(session, Math.asin(MathUtils.clamp(direction.z, -1, 1)) / DEG,
-          Math.atan2(direction.y, direction.x) / DEG, enterVR, vrScores);
-        pickerButton.textContent = 'Choose landing in VR';
-      } catch (error) {
-        await session?.end().catch(() => {});
-        pickerButton.textContent = 'Try VR landing again';
-        console.warn('VR landing picker', error);
-      } finally { pickerButton.disabled = false; }
-    };
+  const switchComputer=pickerButton.cloneNode() as HTMLButtonElement;
+  switchComputer.textContent='Pair another computer';
+  let openingHeadset=false, headsetBrowser=false, receivingQuest=false;
+  const castPanel=/OculusBrowser|Quest/i.test(navigator.userAgent)||new URLSearchParams(location.search).has('quest')?undefined:mountCastPanel({
+    globe:{...browserGlobe,draw:(eye,dt)=>{browserGlobe.draw(eye,dt);needsRender=true;}},
+    scores:vrScores,
+    siteAt:async(lat,lon)=>{
+      const {loadWalkTerrain}=await import('./walkTerrain');
+      return siteAt(lat,lon,loadWalkTerrain(lat,lon));
+    }
+  });
+  const pairing=new QuestHandoff(connection=>openHeadset(undefined,connection));
+  pickerButton.onclick=()=>void pairing.resumeOrPair();
+  switchComputer.onclick=()=>pairing.pair();
+  popup.onLand=()=>{
+    if (!site || openingHeadset || landingBusy) return;
+    const point={lat:site.lat,lon:site.lon};
+    if(headsetBrowser && (/OculusBrowser|Quest/i.test(navigator.userAgent) || new URLSearchParams(location.search).has('quest'))) void openHeadset(point).catch(error=>{
+      popup.vrMessage.textContent=error.message;
+      popup.vrMessage.hidden=false;
+    });
+    else {
+      void pairing.send(point,()=>overlay?.enabled??false).catch(error=>console.warn('Quest handoff',error));
+      void startLanding(point.lat,point.lon);
+    }
+  };
+  async function updateHeadset() {
+    try {headsetBrowser=!!await navigator.xr?.isSessionSupported('immersive-vr');}
+    catch {headsetBrowser=false;}
+    pickerButton.textContent=savedComputer()?'Resume VR':'Connect to computer';
+    if(headsetBrowser){
+      const centre=hud.root.querySelector('.moon-centre');
+      centre?.append(pickerButton);
+      if(savedComputer())centre?.append(switchComputer);else switchComputer.remove();
+    }else{pickerButton.remove();switchComputer.remove();}
   }
-  async function enterVR(lat: number, lon: number, headset?: GlobeHeadset) {
+  void updateHeadset();
+  navigator.xr?.addEventListener('devicechange',updateHeadset);
+
+  async function openHeadset(selected?:SurfacePoint, paired?:QuestConnection) {
+    if(openingHeadset || landingBusy) throw new Error('A VR session is already open.');
+    if(!navigator.xr)throw new Error('Open Moon in the Quest browser to enter VR.');
+    openingHeadset=true;
+    popup.vrMessage.hidden=true;
+    let session:XRSession|undefined;
+    const connection=new AbortController();
+    try {
+      session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});
+      castPanel?.hide();
+      receivingQuest=!!paired;
+      session.addEventListener('end',()=>{castPanel?.show();receivingQuest=false;connection.abort();},{once:true});
+      cancelPrep();
+      await openSurfaceVR(session,async headset=>{
+        if(paired){
+          await receiveQuest(paired,connection.signal,(point,listen)=>startLanding(point.lat,point.lon,{...headset,listen}),applyFeasibility);
+        }else if(selected) await startLanding(selected.lat,selected.lon,headset);
+      });
+    } catch(error){
+      connection.abort();
+      await session?.end().catch(()=>{});
+      throw error;
+    } finally {openingHeadset=false;void updateHeadset();}
+  }
+  async function startLanding(lat: number, lon: number, headset?: GlobeHeadset) {
     landingBusy = true;
     clearTimeout(prefetchTimer);
     prefetchTimer = 0;

@@ -1,4 +1,4 @@
-import type { RockAtlas, RockReading } from './boulderField';
+import type { RockAtlas } from './boulderField';
 
 const base = import.meta.env.BASE_URL + 'lunar-rocks/';
 const noData = 65535;
@@ -56,12 +56,4 @@ async function load(): Promise<RockAtlas> {
 let pending: Promise<RockAtlas> | undefined;
 export function loadRockAtlas() {
   return pending ??= load().catch(error => { pending = undefined; throw error; });
-}
-
-export function describeRocks(r: RockReading) {
-  const thermal = r.cover === null ? 'Rock cover estimated from lunar average'
-    : 'Diviner rock cover ' + (r.cover * 100).toFixed(2) + '%';
-  if (!r.counts) return thermal + ' · Boulder sizes modeled';
-  const density = r.counts.reduce((a, b) => a + b, 0);
-  return thermal + ' · ≥4.5 m boulders: ' + density.toLocaleString(undefined, { maximumFractionDigits: 1 }) + '/km² surveyed';
 }

@@ -121,6 +121,7 @@ uniform vec3 uDustOrigin;
 uniform float uDustReady;
 uniform sampler2D uFeas;     // feasibility score (R8, 0..1 = 0..100 %), corner-aligned samples
 uniform vec3 uFeasXf;        // (scale, offsetU, offsetV): tile uv -> score tile uv
+uniform float uHeatStrength;
 uniform float uFeasOn;       // 1 = draw the heatmap
 uniform float uFeasN;        // samples per score-tile side
 
@@ -197,7 +198,7 @@ void main() {
     vec3 ramp = sc < 0.5 ? mix(red, yellow, sc * 2.0) : mix(yellow, green, sc * 2.0 - 1.0);
     ramp = pow(ramp, vec3(2.2));
     float relief = 0.55 + 0.45 * max(dot(n, V), 0.0);
-    c = mix(c, ramp * relief, 0.72);
+    c = mix(c, ramp * relief, uHeatStrength);
   }
   fragColor = vec4(toSRGB(c), 1.0);
 }
@@ -207,10 +208,11 @@ export const skyVS = /* glsl */ `
 precision highp float;
 in vec2 position;
 uniform mat3 uInvViewRot;   // view -> body
+uniform vec2 uEyeOffset;
 uniform vec2 uTanHalf;      // (tan(fovx/2), tan(fovy/2))
 out vec3 vDirB;
 void main() {
-  vec3 dView = vec3(position * uTanHalf, -1.0);
+  vec3 dView = vec3((position + uEyeOffset) * uTanHalf, -1.0);
   vDirB = uInvViewRot * dView;
   gl_Position = vec4(position, 1.0, 1.0);
 }

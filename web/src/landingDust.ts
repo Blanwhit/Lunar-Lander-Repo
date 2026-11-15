@@ -1,5 +1,5 @@
 import {
-  DataTexture, DynamicDrawUsage, Float32BufferAttribute, InstancedBufferAttribute, InstancedBufferGeometry, LinearFilter,
+  BackSide, Data3DTexture, DynamicDrawUsage, Float32BufferAttribute, InstancedBufferAttribute, InstancedBufferGeometry, LinearFilter,
   MathUtils, Mesh, Quaternion, RedFormat, RepeatWrapping, ShaderMaterial, Vector3,
 } from 'three';
 import { LandingBed } from './landerDynamics';
@@ -9,67 +9,121 @@ const capacity = 3072;
 const gravityTerm = lunarGravity / 2;
 const maxFlight = 4;
 
-// Each instance represents a packet of grains with slightly different launch velocities.
-// Its footprint grows with flight time. Project its three physical axes separately in each eye.
+// Each box bounds a moving ellipsoid. Integrate its far and near halves separately so
+// terrain and spacecraft depth can occlude the back of a packet that straddles a surface.
+function volumeGeometry() {
+  const corners = [-1,-1,-1, 1,-1,-1, 1,1,-1, -1,1,-1, -1,-1,1, 1,-1,1, 1,1,1, -1,1,1];
+  const faces = [0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,4,7, 0,7,3, 1,2,6, 1,6,5, 0,1,5, 0,5,4, 3,7,6, 3,6,2];
+  const geometry = new InstancedBufferGeometry();
+  geometry.setIndex([...faces,...faces.map(i => i+8)]);
+  geometry.setAttribute('position',new Float32BufferAttribute([...corners,...corners],3));
+  geometry.setAttribute('nearHalf',new Float32BufferAttribute([0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1],1));
+  return geometry;
+}
+
 const vertexShader = `
   attribute vec4 launch, flight, appearance;
+  attribute float nearHalf;
   uniform float clock;
-  varying vec2 patchUV;
-  varying vec3 dustStyle;
+  uniform vec3 sunlight;
+  varying vec3 boxPoint;
+  flat varying vec3 eyeLocal, radii, sunLocal;
+  flat varying vec4 viewDepth;
+  flat varying vec3 style;
+  flat varying float frontHalf;
+
   void main() {
     float age = clock - launch.w;
-    if (age < 0. || age >= flight.w) {
-      gl_Position = vec4(2., 2., 2., 1.);
+    bool grit = appearance.z > .5;
+    if (age < 0. || age >= flight.w || (grit && nearHalf < .5)) {
+      gl_Position = vec4(2.,2.,2.,1.);
       return;
     }
     vec3 centre = launch.xyz + flight.xyz * age;
     centre.y -= ${gravityTerm} * age * age;
     vec2 heading = normalize(flight.xz);
-    bool grit = appearance.z > .5;
-    float spread = appearance.x;
-    vec3 size = grit ? vec3(.027, .014, .012) * spread :
-      vec3(.88 + age * 4.1, .45 + age * 1.55, .085 + age * .30) * spread;
-    mat3 view = mat3(modelViewMatrix);
-    vec3 along = view * vec3(heading.x, 0., heading.y) * size.x;
-    vec3 across = view * vec3(-heading.y, 0., heading.x) * size.y;
-    vec3 up = view * vec3(0., 1., 0.) * size.z;
-    // Screen-space ellipse of the projected ellipsoid, with texture aligned to the flow.
-    vec2 axis = along.xy / max(length(along.xy), .00001);
-    if (dot(axis,axis) < .5) axis = vec2(1.,0.);
-    vec2 side = vec2(-axis.y,axis.x);
-    vec3 a = vec3(dot(along.xy,axis), dot(across.xy,axis), dot(up.xy,axis));
-    vec3 b = vec3(dot(along.xy,side), dot(across.xy,side), dot(up.xy,side));
-    float lengthA = max(length(a), .00001);
-    float skew = dot(a,b) / lengthA;
-    float lengthB = sqrt(max(dot(b,b)-skew*skew,.000001));
-    vec2 quad = position.xy;
-    vec4 point = modelViewMatrix * vec4(centre, 1.);
-    point.xy += axis * (lengthA * quad.x) + side * (skew * quad.x + lengthB * quad.y);
-    // Give the sheet its true depth across the quad, including at grazing angles near the soil.
-    vec3 depth = vec3(along.z,across.z,up.z);
-    float depthA = dot(depth,a)/lengthA;
-    float depthB = (dot(depth,b)-skew*depthA)/lengthB;
-    point.z += depthA*quad.x + depthB*quad.y;
-    gl_Position = projectionMatrix * point;
-    float fade = smoothstep(0., .065, age) * smoothstep(0., .15, flight.w-age);
-    dustStyle = vec3(appearance.y * fade / (1. + age * .95), appearance.w, appearance.z);
-    patchUV = quad;
+    mat3 basis = mat3(vec3(heading.x,0.,heading.y), vec3(0.,1.,0.), vec3(-heading.y,0.,heading.x));
+    radii = appearance.x * (grit ? vec3(.034,.018,.023) :
+      vec3(.80 + 3.6*age, .17 + .48*age, .40 + 1.25*age));
+    mat3 axes = mat3(modelViewMatrix) * basis;
+    vec3 centreView = (modelViewMatrix * vec4(centre,1.)).xyz;
+    eyeLocal = transpose(axes) * -centreView / radii;
+    sunLocal = transpose(basis) * sunlight;
+    viewDepth = vec4(vec3(axes[0].z,axes[1].z,axes[2].z)*radii, centreView.z);
+    float fade = smoothstep(0.,.065,age) * smoothstep(0.,.15,flight.w-age);
+    // Expansion dilutes airborne fines; solid grit keeps its silhouette until impact.
+    float dilution = grit ? 1. : pow(1. + age*1.55, 2.4);
+    style = vec3(appearance.y * fade / dilution, appearance.w, appearance.z);
+    boxPoint = position;
+    frontHalf = nearHalf;
+    gl_Position = projectionMatrix * vec4(centreView + axes*(position*radii),1.);
   }`;
 
 const fragmentShader = `
-  uniform sampler2D noiseMap;
+  uniform highp sampler3D noiseMap;
+  uniform mat4 projectionMatrix;
   uniform float daylight;
-  varying vec2 patchUV;
-  varying vec3 dustStyle;
+  varying vec3 boxPoint;
+  flat varying vec3 eyeLocal, radii, sunLocal;
+  flat varying vec4 viewDepth;
+  flat varying vec3 style;
+  flat varying float frontHalf;
+
   void main() {
-    float envelope = max(0., 1. - dot(patchUV,patchUV));
-    vec2 uv = patchUV * vec2(.095,.075) + vec2(dustStyle.y, dustStyle.y*.73);
-    float noise = texture2D(noiseMap, uv).r * .7 + texture2D(noiseMap, uv*3.1).r * .3;
-    float density = mix((.24 + .76*smoothstep(.15,.84,noise)) * envelope * envelope, envelope, dustStyle.z);
-    float alpha = dustStyle.x * density;
+    // Work from a point on the proxy, avoiding cancellation when the observer is far away.
+    vec3 ray = normalize(boxPoint-eyeLocal);
+    vec3 closest = boxPoint - ray*dot(boxPoint,ray);
+    float chordSq = 1. - dot(closest,closest);
+    if (chordSq <= 0.) discard;
+    float end = sqrt(chordSq);
+    float start = max(-end,dot(eyeLocal-closest,ray));
+    if (start >= end) discard;
+
+    vec3 depthPoint;
+    vec3 color;
+    float alpha;
+    if (style.z > .5) {
+      depthPoint = closest + start*ray;
+      vec3 normal = normalize(depthPoint / radii);
+      color = vec3(.34,.32,.30)*(.07 + daylight*(.18+.93*max(0.,dot(normal,sunLocal))));
+      alpha = style.x;
+    } else {
+      float middle = .5*(start+end);
+      if (frontHalf > .5) end = middle; else start = middle;
+      float stepLength = (end-start)/3.;
+      float metresPerStep = stepLength * length(ray*radii);
+      vec3 offset = style.y * vec3(.61,.83,.47);
+      vec3 sunRay = normalize(sunLocal/radii);
+      float sunScale = length(sunRay*radii);
+      float scattering = .70 + .30*pow(max(0.,dot(normalize(ray*radii),sunLocal)),3.);
+      float transmission = 1.;
+      float light = 0., weightedDepth = 0.;
+      for (int i=0; i<3; i++) {
+        float t = start + (float(i)+.5)*stepLength;
+        vec3 point = closest + ray*t;
+        vec3 uvw = point*vec3(.084,.10,.115) + offset;
+        float noise = .72*texture(noiseMap,uvw).r + .28*texture(noiseMap,uvw*2.35).r;
+        float envelope = max(0.,1.-dot(point,point));
+        float density = max(0.,envelope - .27*(1.-noise))*smoothstep(.20,.80,noise);
+        float absorbed = transmission * (1.-exp(-2.0*style.x*density*metresPerStep));
+        float projected = dot(point,sunRay);
+        float sunPath = (sqrt(projected*projected+envelope)-projected)*sunScale;
+        float lit = exp(-1.6*sunPath*style.x*(.35+density));
+        light += absorbed * (.055 + daylight*(.16 + .98*lit*scattering));
+        weightedDepth += absorbed*t;
+        transmission -= absorbed;
+      }
+      alpha = 1.-transmission;
+      if (alpha < .003) discard;
+      depthPoint = closest + ray*(weightedDepth/alpha);
+      color = vec3(.48,.46,.43)*light/alpha;
+    }
     if (alpha < .003) discard;
-    vec3 soil = vec3(.47,.45,.42) * mix(.10,1.,daylight) * (.78 + .35*noise);
-    gl_FragColor = vec4(soil,alpha);
+    float z = dot(viewDepth.xyz,depthPoint) + viewDepth.w;
+    float ndc = (projectionMatrix[2][2]*z + projectionMatrix[3][2]) / -z;
+    if (ndc < -1. || ndc > 1.) discard;
+    gl_FragDepth = .5*ndc+.5;
+    gl_FragColor = vec4(color,alpha);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }`;
@@ -79,14 +133,14 @@ function particleAttribute() {
 }
 
 export class LandingDust {
-  private geometry = new InstancedBufferGeometry();
+  private geometry = volumeGeometry();
   private launch = particleAttribute();
   private flight = particleAttribute();
   private appearance = particleAttribute();
-  private noise = new DataTexture(new Uint8Array(64*64),64,64,RedFormat);
+  private noise = new Data3DTexture(new Uint8Array(32**3),32,32,32);
   private material = new ShaderMaterial({
-    uniforms: {clock:{value:0}, daylight:{value:1}, noiseMap:{value:this.noise}},
-    vertexShader, fragmentShader, transparent:true, depthWrite:false,
+    uniforms: {clock:{value:0}, daylight:{value:1}, sunlight:{value:new Vector3()}, noiseMap:{value:this.noise}},
+    vertexShader, fragmentShader, side:BackSide, transparent:true, depthWrite:false,
   });
   readonly mesh = new Mesh(this.geometry,this.material);
   private bed: LandingBed;
@@ -102,11 +156,10 @@ export class LandingDust {
     this.bed = new LandingBed(surface, 1.5);
     const pixels = this.noise.image.data as Uint8Array;
     for (let i=0; i<pixels.length; i++) pixels[i] = Math.random()*256;
-    this.noise.wrapS = this.noise.wrapT = RepeatWrapping;
+    this.noise.format = RedFormat;
+    this.noise.wrapS = this.noise.wrapT = this.noise.wrapR = RepeatWrapping;
     this.noise.magFilter = this.noise.minFilter = LinearFilter;
     this.noise.needsUpdate = true;
-    this.geometry.setIndex([0,1,2,0,2,3]);
-    this.geometry.setAttribute('position', new Float32BufferAttribute([-1,-1,0, 1,-1,0, 1,1,0, -1,1,0],3));
     this.geometry.setAttribute('launch',this.launch);
     this.geometry.setAttribute('flight',this.flight);
     this.geometry.setAttribute('appearance',this.appearance);
@@ -123,10 +176,11 @@ export class LandingDust {
     this.mesh.visible = false;
   }
 
-  update(dt:number, origin:Vector3, attitude:Quaternion, height:number, thrust:number, sunY:number) {
+  update(dt:number, origin:Vector3, attitude:Quaternion, height:number, thrust:number, sun:Vector3) {
     this.clock += dt;
     this.material.uniforms.clock.value = this.clock;
-    this.material.uniforms.daylight.value = MathUtils.smoothstep(sunY,-.045,.26);
+    this.material.uniforms.daylight.value = MathUtils.smoothstep(sun.y,-.045,.26);
+    this.material.uniforms.sunlight.value.copy(sun);
     const erosion = thrust * (1 - MathUtils.smoothstep(height,1,30));
     if (erosion > 0 && dt > 0) {
       // Trace the tilted engine axis from the nozzle lip to the local surface.
