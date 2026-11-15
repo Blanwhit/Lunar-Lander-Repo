@@ -46,10 +46,13 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   const subtitle=host.querySelector<HTMLElement>('.cast-caption')!;
   const caption=(s:string)=>{if(subtitle.textContent!==s)subtitle.textContent=s;};
   let view:ReturnType<typeof openCastView>|undefined,viewId=0;
+  let preferVideo=false;
+  const casting=()=>!panel.hidden;
+  const wantsEye=()=>casting() && (preferVideo || (surfaceMode && panel.matches(':modal')));
   let pc:RTCPeerConnection|undefined,ch:RTCDataChannel|undefined;
   let remoteEye:MediaStreamTrack|undefined,supportsEye=false,surfaceMode=false,frameCallback=0,stall=0;
   let formats:string[]=[];
-  void playableEyes().then(keys=>{formats=keys;if(view&&nativeCapable)watch();});
+  void playableEyes().then(keys=>{formats=keys;if(casting()&&nativeCapable)watch();});
   const buffered=host.querySelector<HTMLCanvasElement>('.buffered-eye')!;
   let nativeCapable=false,token='',nativeFailed=false,nativeTimer=0;
   let closeReader:(()=>void)|undefined;
@@ -64,7 +67,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   }
   function failBuffer(){
     if(!token)return;
-    nativeFailed=true;stopBuffer();if(view)watch();syncEye();
+    nativeFailed=true;stopBuffer();if(casting())watch();syncEye();
   }
   function showEye(on:boolean){
     picture.toggleAttribute('data-eye',on);
@@ -74,25 +77,28 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
   function detachEye(){
     clearTimeout(stall);
     if(frameCallback)video.cancelVideoFrameCallback(frameCallback);
-    frameCallback=0;video.pause();video.srcObject=null;showEye(false);
+    frameCallback=0;video.onplaying=video.ontimeupdate=null;video.pause();video.srcObject=null;showEye(false);
   }
   function syncEye(){
-    if(token || !view || !panel.matches(':modal') || !remoteEye || !supportsEye || !surfaceMode){
+    if(token || !wantsEye() || !remoteEye || !supportsEye){
       if(video.srcObject)detachEye();
       return;
     }
     if(video.srcObject)return;
     const stream=new MediaStream([remoteEye]);video.srcObject=stream;
+    const frameEvents=typeof video.requestVideoFrameCallback==='function';
     const presented=()=>{
       if(video.srcObject!==stream)return;
       showEye(true);
       clearTimeout(stall);stall=window.setTimeout(()=>showEye(false),1100);
-      frameCallback=video.requestVideoFrameCallback(presented);
+      if(frameEvents)frameCallback=video.requestVideoFrameCallback(presented);
     };
-    if(typeof video.requestVideoFrameCallback==='function'){
-      frameCallback=video.requestVideoFrameCallback(presented);
-      void video.play().catch(()=>{if(video.srcObject===stream)detachEye();});
-    }
+    if(frameEvents)frameCallback=video.requestVideoFrameCallback(presented);
+    else video.onplaying=video.ontimeupdate=()=>{if(video.videoWidth)presented();};
+    void video.play().catch(error=>{
+      if(video.srcObject!==stream)return;
+      console.warn('Moon headset video playback failed',error);detachEye();
+    });
   }
   let supportsPacked=false,relayTime:number|undefined;
   let id='',began=0,lastAlive=0,stopped=false,timer=0;
@@ -115,7 +121,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
       Number.isFinite(f.fov) && (f.mode==='surface'?f.site?.length===2&&f.sun?.length===3:f.pivot?.length===3)){
       const surface=f.mode==='surface' && !relayed;
       if(surface!==surfaceMode){
-        surfaceMode=surface;stopBuffer();nativeFailed=false;if(view)watch();
+        surfaceMode=surface;stopBuffer();nativeFailed=false;if(casting())watch();
       }
       syncEye();view?.frame(f,relayed);
     }
@@ -128,20 +134,24 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
         const direct=lastAlive>0 && performance.now()-lastAlive<5500;
         if(direct){lease(false);}
         else{
-          if(view && performance.now()-watchRenewed>4000)lease(true);
-          const state=await castSignal('live',key,{frames:!!view,batched:true,after:relayTime},stop.signal);
-          if(state?.online){onlineAt=performance.now();connected();}
-          if(view && !(lastAlive && performance.now()-lastAlive<5500)){
+          if(casting() && performance.now()-watchRenewed>4000)lease(true);
+          const state=await castSignal('live',key,{frames:casting(),batched:true,after:relayTime},stop.signal);
+          if(state?.online){
+            onlineAt=performance.now();connected();
+            if(casting() && !view && preferVideo && !lastAlive)
+              caption('Waiting for headset video. Refresh Moon on this computer if the 3D viewer failed to load.');
+          }
+          if(casting() && !(lastAlive && performance.now()-lastAlive<5500)){
             for(const f of state?.history??(state?.frame?[state.frame]:[])){consume(f,true);relayTime=f.time;}
           }
           if(!state?.online && performance.now()-onlineAt>11000){
             delete host.dataset.connected;action.disabled=true;status.textContent='Connecting to Quest…';
-            if(view)caption('Reconnecting to Quest…');
+            if(casting())caption('Reconnecting to Quest…');
           }
         }
       }
     }catch{}
-    if(!stopped)relayTimer=window.setTimeout(receiveRelay,view && (!lastAlive||performance.now()-lastAlive>5500)?Math.max(0,65-(performance.now()-started)):1500);
+    if(!stopped)relayTimer=window.setTimeout(receiveRelay,casting() && (!lastAlive||performance.now()-lastAlive>5500)?Math.max(0,65-(performance.now()-started)):1500);
   }
   function reset() {
     stopBuffer();nativeCapable=nativeFailed=false;detachEye();remoteEye=undefined;supportsEye=surfaceMode=false;
@@ -150,7 +160,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     if(performance.now()-onlineAt>11000){
       delete host.dataset.connected;action.disabled=true;status.textContent='Connecting to Quest…';
     }
-    if(view){watchRenewed=-Infinity;view.reset();}
+    if(casting()){watchRenewed=-Infinity;view?.reset();}
   }
   function tell(s:string){if(ch?.readyState==='open')ch.send(s);}
   const resize=host.querySelector<HTMLButtonElement>('[aria-label="Resize Quest view"]')!;
@@ -161,7 +171,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     resize.textContent=on?'Restore':'Resize';
     resize.setAttribute('aria-label',on?'Restore compact Quest view':'Resize Quest view');
     resize.setAttribute('aria-pressed',String(on));
-    setCastPresentation(on?'expanded':'compact');if(view)watch();syncEye();
+    setCastPresentation(on?'expanded':'compact');if(casting())watch();syncEye();
     resize.focus({preventScroll:true});
   }
   resize.setAttribute('aria-pressed','false');
@@ -173,8 +183,8 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)expand(false);
   };
   function watch(){
-    const eye=supportsEye && panel.matches(':modal') && typeof video.requestVideoFrameCallback==='function';
-    if(eye && surfaceMode && nativeCapable && !nativeFailed && formats.length){
+    const eye=supportsEye && wantsEye();
+    if(eye && surfaceMode && panel.matches(':modal') && nativeCapable && !nativeFailed && formats.length){
       if(!token){token=crypto.randomUUID();nativeTimer=window.setTimeout(failBuffer,10000);}
       tell('watch-buffered:'+token+':'+formats.join(','));return;
     }
@@ -185,11 +195,9 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     ++viewId;panel.close();panel.hidden=true;host.removeAttribute('data-large');
     resize.textContent='Resize';resize.setAttribute('aria-label','Resize Quest view');resize.setAttribute('aria-pressed','false');
     setCastPresentation('closed');relayTime=undefined;
-    if(view){
-      view.close();view=undefined;
-      const fresh=canvas.cloneNode(false) as HTMLCanvasElement;
-      canvas.replaceWith(fresh);canvas=fresh;
-    }
+    view?.close();view=undefined;preferVideo=false;
+    const fresh=canvas.cloneNode(false) as HTMLCanvasElement;
+    canvas.replaceWith(fresh);canvas=fresh;
     tell('stop');lease(false);
     action.textContent='Cast';action.setAttribute('aria-expanded','false');
   }
@@ -198,16 +206,32 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     if(!panel.hidden){closeView();return;}
     const version=++viewId;panel.hidden=false;panel.show();action.textContent='Stop casting';action.setAttribute('aria-expanded','true');
     caption('Waiting for Quest view…');
+    setCastPresentation('compact');watch();if(!lastAlive)lease(true);
+    const useEye=(reason:unknown)=>{
+      if(viewId!==version || !casting())return;
+      console.warn('Moon spectator scene unavailable',reason);
+      preferVideo=true;
+      if(!picture.hasAttribute('data-eye')&&!picture.hasAttribute('data-native'))
+        caption('Connecting to the headset video…');
+      watch();syncEye();
+    };
+    canvas.addEventListener('webglcontextlost',useEye);
+    canvas.addEventListener('webglcontextrestored',()=>{
+      if(viewId!==version||!view)return;
+      preferVideo=view.shared;watch();syncEye();
+    });
     try{
       const {openCastView}=await import('./castView');
       if(viewId!==version)return;
-      view=openCastView(canvas,world,caption);setCastPresentation(panel.matches(':modal')?'expanded':'compact');watch();if(!lastAlive)lease(true);
-    }catch{caption('Could not open the 3D view. Close and try again.');}
+      view=openCastView(canvas,world,caption);
+      if(view.shared){preferVideo=true;watch();syncEye();}
+      view.mirroring(picture.hasAttribute('data-eye')||picture.hasAttribute('data-native'));
+    }catch(error){useEye(error);}
   };
   host.querySelector<HTMLButtonElement>('[aria-label="Close Quest view"]')!.onclick=closeView;
   function peer(key:string) {
     const current=pc=castPeer(),channel=ch=current.createDataChannel('moon-scene',{ordered:false,maxRetransmits:0});
-    if(typeof current.addTransceiver==='function' && typeof video.requestVideoFrameCallback==='function'){
+    if(typeof current.addTransceiver==='function'){
       const receiver=current.addTransceiver('video',{direction:'recvonly'}).receiver;
       if('jitterBufferTarget' in receiver){
         try{(receiver as RTCRtpReceiver & {jitterBufferTarget:number}).jitterBufferTarget=260;}catch{}
@@ -230,16 +254,16 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
     };
     channel.binaryType='arraybuffer';
     id=crypto.randomUUID();began=performance.now();
-    channel.onopen=()=>{if(current!==pc)return;lastAlive=performance.now();tell('ping');if(view)watch();else tell('stop');};
+    channel.onopen=()=>{if(current!==pc)return;lastAlive=performance.now();tell('ping');if(casting())watch();else tell('stop');};
     channel.onmessage=e=>{
       if(current!==pc)return;
       lastAlive=performance.now();
       connected();
-      if(e.data==='supports-buffered'){nativeCapable=true;if(view)watch();syncEye();return;}
+      if(e.data==='supports-buffered'){nativeCapable=true;if(casting())watch();syncEye();return;}
       if(token&&e.data==='buffer-failed:'+token){failBuffer();return;}
-      if(e.data==='supports-eye'){supportsEye=true;if(view)watch();syncEye();return;}
-      if(e.data==='supports-packed'){supportsPacked=true;if(view)watch();return;}
-      if(e.data==='alive'||!view)return;
+      if(e.data==='supports-eye'){supportsEye=true;if(casting())watch();syncEye();return;}
+      if(e.data==='supports-packed'){supportsPacked=true;if(casting())watch();return;}
+      if(e.data==='alive'||!casting())return;
       try{
         if(e.data instanceof ArrayBuffer && e.data.byteLength<=65536)consume(unpack(e.data));
         else if(typeof e.data==='string' && e.data.length<=65536)consume(JSON.parse(e.data));
@@ -255,7 +279,7 @@ body:has(.walk-scene:not([inert])) .moon-cast{bottom:max(12px,env(safe-area-inse
       if(key && !host.hidden && !(document.hidden && panel.hidden)){
         if(pc && (pc.connectionState==='failed'||(lastAlive?performance.now()-lastAlive>9500:performance.now()-began>30000)))reset();
         if(!pc)await peer(key);
-        else if(ch?.readyState==='open'){tell('ping');if(view)watch();else tell('stop');}
+        else if(ch?.readyState==='open'){tell('ping');if(casting())watch();else tell('stop');}
         else if(pc.signalingState==='have-local-offer'){
           const current=pc,state=await castSignal('status',key,{},stop.signal);
           if(pc===current && state?.id===id && state.answer)await current.setRemoteDescription({type:'answer',sdp:state.answer});

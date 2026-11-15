@@ -32,22 +32,18 @@ interface Tile {
   annualSun: Float32Array; annualEarth: Float32Array; meanAbs: Float32Array;
 }
 
-/**
- * Bounds that let the time scans skip steps whose outcome is certain. A body's elevation
- * (seen from any site) changes by at most the angle it moves on the sky (elevation is
- * 1-Lipschitz on the sphere), plus the parallax between the site and the Moon's centre at
- * both ends. `fwd[s]` / `back[s]` are cumulative angles (deg) along the forward / backward
- * timeline from "now"; skipped steps are only those where the margin's sign is proven.
- */
+// Moon-centred unit directions, with a conservative topocentric parallax allowance.
 interface Bounds {
-  fwd: Float64Array; // s = 0..FWD_STEPS
-  back: Float64Array; // s = 0..BACK_STEPS (step s back = timeline index FWD_STEPS + s)
-  parallax: number; // deg, upper bound for one end
-  radiusMax: number; // deg, largest apparent radius over the timeline
+  unit: Float64Array;
+  blockRadius: Float64Array;
+  parallax: number;
+  radiusMax: number;
 }
+const BLOCK = 8;
 
 const tiles = new Map<string, Tile>();
 let timeline: { token: number; sun: Float64Array; earth: Float64Array; sunB: Bounds; earthB: Bounds } | null = null;
+let slopeLimits = DEFAULT_FEASIBILITY.factors.landing.slopeDeg;
 let score = feasibilityScorer(); // same result as feasibility(inp, config).score
 // horizon tolerance (deg): Sun / Earth count as visible down to this far below the horizon.
 // The mast height is baked into the tiles (their horizons are seen from MAST_H).
@@ -59,24 +55,29 @@ const SITE_MAX_KM = (R_MOON + 11000) / 1000; // highest possible observer (km fr
 const SAFE = 1e-4; // deg of slack on every proof (float rounding)
 const MAST_H = 10; // observer height (m) the tiles' horizons were marched from: pipeline MAST_H
 
-/** angle (deg) between timeline vectors i and j: atan2 form, accurate for tiny angles */
-function angleDeg(v: Float64Array, i: number, j: number): number {
-  const ax = v[3 * i], ay = v[3 * i + 1], az = v[3 * i + 2], bx = v[3 * j], by = v[3 * j + 1], bz = v[3 * j + 2];
-  const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
-  return Math.atan2(Math.hypot(cx, cy, cz), ax * bx + ay * by + az * bz) / DEG;
+function bounds(v: Float64Array, radiusKm: number): Bounds {
+  const unit = new Float64Array(v.length);
+  const count = v.length / 3;
+  const blockRadius = new Float64Array(Math.ceil((count - 1) / BLOCK));
+  let dMin = Infinity;
+  for (let i = 0; i < count; i++) {
+    const k = 3 * i;
+    const d = Math.hypot(v[k], v[k+1], v[k+2]);
+    dMin = Math.min(dMin, d);
+    for (let j = 0; j < 3; j++) unit[k+j] = v[k+j] / d;
+    if (i === 0) continue;
+    const block = Math.floor((i - 1) / BLOCK);
+    const first = 3 * (1 + block * BLOCK);
+    const chord = Math.hypot(unit[k]-unit[first], unit[k+1]-unit[first+1], unit[k+2]-unit[first+2]);
+    blockRadius[block] = Math.max(blockRadius[block], chord);
+  }
+  return { unit, blockRadius, parallax: Math.asin(SITE_MAX_KM / dMin) / DEG,
+    radiusMax: Math.asin(Math.min(1, radiusKm / (dMin - SITE_MAX_KM))) / DEG };
 }
 
-function bounds(v: Float64Array, radiusKm: number): Bounds {
-  const fwd = new Float64Array(FWD_STEPS + 1), back = new Float64Array(BACK_STEPS + 1);
-  for (let s = 1; s <= FWD_STEPS; s++) fwd[s] = fwd[s - 1] + angleDeg(v, s - 1, s);
-  for (let s = 1; s <= BACK_STEPS; s++) back[s] = back[s - 1] + angleDeg(v, s === 1 ? 0 : FWD_STEPS + s - 1, FWD_STEPS + s);
-  let dMin = Infinity;
-  for (let i = 0; i < v.length / 3; i++) dMin = Math.min(dMin, Math.hypot(v[3 * i], v[3 * i + 1], v[3 * i + 2]));
-  return {
-    fwd, back,
-    parallax: Math.asin(SITE_MAX_KM / dMin) / DEG,
-    radiusMax: Math.asin(Math.min(1, radiusKm / (dMin - SITE_MAX_KM))) / DEG,
-  };
+function sineElevation(bounds: Bounds, step: number, up: Float64Array, k: number) {
+  const u = bounds.unit, i = 3 * step;
+  return u[i] * up[k] + u[i+1] * up[k+1] + u[i+2] * up[k+2];
 }
 
 async function load(key: string, url: string): Promise<number> {
@@ -155,7 +156,7 @@ function discFraction(m: number, r: number): number {
 }
 
 /** geometry of a body (timeline vector `vi`) from sample k: margin above horizon, radius, dist,
- *  unit vector, elevation (out[6]) */
+ *  unit vector */
 function geo(t: Tile, k: number, body: Float64Array, vi: number, radiusKm: number, out: Float64Array) {
   const k3 = 3 * k, b3 = 3 * vi;
   const vx = body[b3] - t.site[k3], vy = body[b3 + 1] - t.site[k3 + 1], vz = body[b3 + 2] - t.site[k3 + 2];
@@ -172,22 +173,23 @@ function geo(t: Tile, k: number, body: Float64Array, vi: number, radiusKm: numbe
   out[1] = Math.asin(radiusKm / d) / DEG;
   out[2] = d;
   out[3] = x; out[4] = y; out[5] = z;
-  out[6] = el;
 }
 
-/**
- * Hours until the margin + tolerance `tl` first drops to <= 0, scanning the forward timeline.
- * Steps where the elevation bound keeps the body above the sample's highest horizon bin minus
- * `tl` are skipped (their margin is provably > -tl); the step before a crossing is evaluated
- * for the interpolation, so the result is the same as evaluating every step. `m0` is the
- * tolerance-shifted margin now.
- */
-function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number, m0: number, el0: number,
+/** Search for the first crossing. The highest terrain bin bounds every azimuth.
+ * The dot product with local up changes by at most the block's maximum chord length.
+ * Near the bound, evaluate the original topocentric geometry and interpolate as before. */
+function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number, m0: number,
   tl: number, B: Bounds, g: Float64Array): number {
-  let prev = m0, prevS = 0, a = 0, elA = el0;
-  const top = t.hzMax[k] - tl + 2 * B.parallax + SAFE;
+  let prev = m0, prevS = 0;
+  const top = t.hzMax[k] - tl + B.parallax + SAFE;
+  const limit = Math.sin(Math.max(-90, Math.min(90, top)) * DEG) + 1e-12;
   for (let s = 1; s <= FWD_STEPS; s++) {
-    if (elA - (B.fwd[s] - B.fwd[a]) > top) continue;
+    const sine = sineElevation(B, s, t.up, k * 3);
+    if (sine > limit) {
+      const block = (s - 1) / BLOCK;
+      if (Number.isInteger(block) && sine - B.blockRadius[block] > limit) s += BLOCK - 1;
+      continue;
+    }
     geo(t, k, body, s, radiusKm, g);
     if (g[0] + tl <= 0) {
       const m = g[0] + tl;
@@ -198,28 +200,32 @@ function hoursRemaining(t: Tile, k: number, body: Float64Array, radiusKm: number
       return STEP_H * (s - 1 + prev / (prev - m));
     }
     prev = g[0] + tl;
-    prevS = a = s;
-    elA = g[6];
+    prevS = s;
   }
   return STEP_H * FWD_STEPS;
 }
 
 function compute(t: Tile, sun: Float64Array, earth: Float64Array, sunB: Bounds, earthB: Bounds): Uint8Array {
   const out = new Uint8Array(t.n);
-  const g = new Float64Array(7);
+  const g = new Float64Array(6);
   for (let k = 0; k < t.n; k++) {
     const k3 = 3 * k;
+    if ((slopeLimits.knockoutAbove !== undefined && t.slope[k] > slopeLimits.knockoutAbove) ||
+        (slopeLimits.knockoutBelow !== undefined && t.slope[k] < slopeLimits.knockoutBelow)) {
+      out[k] = Math.round(2.55);
+      continue;
+    }
     // Sun now
     geo(t, k, sun, 0, R_SUN_KM, g);
     // vf: physical (drives the temperature); sm / svf: with the tolerance (drive the Power score)
-    const sm = g[0] + tol, vf = discFraction(g[0], g[1]), svf = discFraction(sm, g[1]), sunEl = g[6];
+    const sm = g[0] + tol, vf = discFraction(g[0], g[1]), svf = discFraction(sm, g[1]);
     const ci = g[3] * t.normal[k3] + g[4] * t.normal[k3 + 1] + g[5] * t.normal[k3 + 2];
     const flux = 1361 * (AU_KM / g[2]) ** 2;
-    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, sunEl, tol, sunB, g) : 0;
+    const sunH = sm > 0 ? hoursRemaining(t, k, sun, R_SUN_KM, sm, tol, sunB, g) : 0;
     // Earth now
     geo(t, k, earth, 0, R_EARTH_KM, g);
     const em = g[0] + tol, evf = discFraction(em, g[1]);
-    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, g[6], tol, earthB, g) : 0;
+    const earthH = em > 0 ? hoursRemaining(t, k, earth, R_EARTH_KM, em, tol, earthB, g) : 0;
     // temperature proxy (calibrated against the 1-D model, see README)
     const tDeep = Math.max(20, 0.86 * Math.pow(t.meanAbs[k] / (EMISSIVITY * SIGMA), 0.25));
     const floor = Math.max(20, 0.4 * tDeep), tSet = Math.max(floor, 0.6 * tDeep);
@@ -230,15 +236,20 @@ function compute(t: Tile, sun: Float64Array, earth: Float64Array, sunB: Bounds, 
     } else {
       // last time any part of the Sun was up and facing the slope; skip steps where even the
       // highest possible Sun stays a full radius below the lowest horizon bin (margin <= -radius)
-      let hrs = Infinity, a = 0, elA = sunEl;
-      const low = t.hzMin[k] - 2 * sunB.parallax - sunB.radiusMax - SAFE;
+      let hrs = Infinity;
+      const low = t.hzMin[k] - sunB.parallax - sunB.radiusMax - SAFE;
+      const limit = Math.sin(Math.max(-90, Math.min(90, low)) * DEG) - 1e-12;
       for (let s = 1; s <= BACK_STEPS; s++) {
-        if (elA + (sunB.back[s] - sunB.back[a]) < low) continue;
+        const index = FWD_STEPS + s;
+        const sine = sineElevation(sunB, index, t.up, k3);
+        if (sine < limit) {
+          const block = (index - 1) / BLOCK;
+          if (Number.isInteger(block) && sine + sunB.blockRadius[block] < limit) s += BLOCK - 1;
+          continue;
+        }
         geo(t, k, sun, FWD_STEPS + s, R_SUN_KM, g);
         const c2 = g[3] * t.normal[k3] + g[4] * t.normal[k3 + 1] + g[5] * t.normal[k3 + 2];
         if (g[0] > -g[1] && c2 > 0) { hrs = s * STEP_H; break; }
-        a = s;
-        elA = g[6];
       }
       temp = isFinite(hrs) ? floor + (tSet - floor) * Math.exp(-hrs / 60) : floor;
     }
@@ -271,6 +282,7 @@ self.onmessage = async (ev: MessageEvent<FeasMsg>) => {
   } else if (m.type === 'timeline') {
     timeline = { token: m.token, sun: m.sun, earth: m.earth, sunB: bounds(m.sun, R_SUN_KM), earthB: bounds(m.earth, R_EARTH_KM) };
   } else if (m.type === 'config') {
+    slopeLimits = m.config.factors.landing.slopeDeg;
     score = feasibilityScorer(m.config);
     tol = m.config.horizonToleranceDeg;
   } else if (m.type === 'drop') {

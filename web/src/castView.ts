@@ -1,3 +1,4 @@
+import {castRenderer} from './castRenderer';
 import {castExpanded} from './castPresentation';
 import {CastPlayback,CastResolution} from './castPlayback';
 import { DirectionalLight, HemisphereLight, Matrix3, Matrix4, Mesh, PerspectiveCamera, Quaternion,
@@ -13,7 +14,7 @@ import { WALK_FAR } from './walkGround';
 import { THIRD_PERSON_LAYER } from './suitGear';
 
 type SiteAt=(lat:number,lon:number)=>Promise<WalkSite>;
-export type CastWorld={globe:BrowserGlobe;siteAt:SiteAt;scores?:VrFeasibility};
+export type CastWorld={renderer:WebGLRenderer;globe:BrowserGlobe;siteAt:SiteAt;scores?:VrFeasibility};
 const keyOf=(f:SceneFrame)=>f.mode==='globe'?'globe':f.site!.join(',');
 async function surface(world:CastWorld,frame:SceneFrame) {
   const [lat,lon]=frame.site!;
@@ -104,8 +105,8 @@ function blendPose(a:number[],b:number[],t:number,bones=false){
 
 // A short interpolation buffer decouples browser drawing from wireless packet arrival.
 export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t:string)=>void) {
-  const renderer=new WebGLRenderer({canvas,antialias:false,powerPreference:'high-performance'});
-  renderer.shadowMap.enabled=true;
+  const output=castRenderer(canvas,world.renderer);
+  const renderer=output.renderer;
   const camera=new PerspectiveCamera(75,1,.1,WALK_FAR);
   type Timed={frame:SceneFrame; arrived:number};
   let queue:Timed[]=[],key='',generation=0,closed=false,loading=false;
@@ -134,7 +135,9 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
     }catch{if(id===generation){retryAt=performance.now()+5000;caption('Retrying lunar terrain…');}}
     finally{if(id===generation)loading=false;}
   }
-  renderer.setAnimationLoop(now=>{
+  let animation=0;
+  function tick(now:number){
+    animation=requestAnimationFrame(tick);
     if(mirrored)return;
     const latest=queue.at(-1);
     if(!latest)return;
@@ -149,7 +152,7 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
     resolution.layout(cssWidth*cssHeight*dpr*dpr,expanded);
     const density=resolution.scale(now,elapsed)*dpr;
     const w=Math.max(2,Math.round(cssWidth*density)),h=Math.max(2,Math.round(cssHeight*density));
-    if(canvas.width!==w||canvas.height!==h)renderer.setSize(w,h,false);
+    if(canvas.width!==w||canvas.height!==h)output.resize(w,h);
 
     const playTime=clock.sample(now,elapsed,latest.frame.time,relayed,expanded);
     while(queue.length>2 && queue[1].frame.time<=playTime)queue.shift();
@@ -164,22 +167,26 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
     if(camera.aspect!==w/h || camera.fov!==f.fov){
       camera.aspect=w/h;camera.fov=f.fov;camera.updateProjectionMatrix();
     }
-    if(f.mode==='surface'){
-      if(!surfaceView)return;
-      world.scores?.update(now,true);
-      surfaceView.draw(f,camera,renderer,dt);caption(f.heat?(f.score??''):'');
-    }else{
-      viewRot.setFromMatrix4(rot.makeRotationFromQuaternion(camera.quaternion)).transpose();
-      world.globe.draw({renderer,camPos:camera.position.toArray(),pivot:f.pivot as [number,number,number],viewRot,
-        projection:new Float32Array(camera.projectionMatrix.elements),width:w,height:h,firstEye:true,expandedCast:expanded},dt);
-      if(f.pointer){
-        orbitalDot.position.fromArray(f.pointer);renderer.autoClear=false;
-        renderer.render(dotScene,camera);renderer.autoClear=true;
+    output.draw(()=>{
+      if(f.mode==='surface'){
+        if(!surfaceView)return;
+        world.scores?.update(now,true);
+        surfaceView.draw(f,camera,renderer,dt);caption(f.heat?(f.score??''):'');
+      }else{
+        viewRot.setFromMatrix4(rot.makeRotationFromQuaternion(camera.quaternion)).transpose();
+        world.globe.draw({renderer,camPos:camera.position.toArray(),pivot:f.pivot as [number,number,number],viewRot,
+          projection:new Float32Array(camera.projectionMatrix.elements),width:w,height:h,firstEye:true,expandedCast:expanded},dt);
+        if(f.pointer){
+          orbitalDot.position.fromArray(f.pointer);renderer.autoClear=false;
+          renderer.render(dotScene,camera);renderer.autoClear=true;
+        }
+        caption('');
       }
-      caption('');
-    }
-  });
+    });
+  }
+  animation=requestAnimationFrame(tick);
   return {
+    shared:output.shared,
     mirroring(on:boolean){
       if(mirrored===on)return;
       mirrored=on;last=0;
@@ -203,7 +210,7 @@ export function openCastView(canvas:HTMLCanvasElement,world:CastWorld,caption:(t
       clock.receive(f.time,now);
       if(queue.length>192)queue.shift();
     },
-    close(){closed=true;observer.disconnect();generation++;renderer.setAnimationLoop(null);surfaceView?.dispose();orbitalDot.geometry.dispose();
-      orbitalDot.material.dispose();renderer.dispose();renderer.forceContextLoss();},
+    close(){closed=true;observer.disconnect();generation++;cancelAnimationFrame(animation);surfaceView?.dispose();orbitalDot.geometry.dispose();
+      orbitalDot.material.dispose();output.close();},
   };
 }

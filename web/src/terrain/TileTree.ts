@@ -27,6 +27,7 @@ import {
 import type { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { FACES, GRID, H_MAX_GLOBAL, H_MIN_GLOBAL, MESH_N, R_MOON, TILE_N, Vec3, dirToFace, texelSize } from '../geom';
 import { terrainFS, terrainVS } from './shaders';
+import type { DecodedHeightTile } from './heightCodec';
 import type { HeightRequest, HeightResult } from './heightWorker';
 
 void FloatType;
@@ -263,6 +264,14 @@ export class TileTree {
   }
 
   // ------------------------------------------------------------------ queries
+  /** Share a resident grid with the point analyser before it fetches this same tile. */
+  decodedHeight(level: number, face: number, x: number, y: number): DecodedHeightTile | undefined {
+    const node = this.nodes.get(`${level}/${face}/${x}/${y}`);
+    if (!node?.q) return;
+    return { level, face, x, y, childMask: node.childMask, hmin: node.hmin, hmax: node.hmax,
+      step: node.step, base: node.base, q: node.q };
+  }
+
   /** terrain height (m, vs 1737.4 km) under a body-frame direction, from loaded tiles */
   heightAt(dir: Vec3): number | null {
     const { face, a, b } = dirToFace(dir);

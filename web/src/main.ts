@@ -749,6 +749,7 @@ async function main() {
   switchComputer.textContent='Pair another computer';
   let openingHeadset=false, headsetBrowser=false, receivingQuest=false;
   const castPanel=/OculusBrowser|Quest/i.test(navigator.userAgent)||new URLSearchParams(location.search).has('quest')?undefined:mountCastPanel({
+    renderer,
     globe:{...browserGlobe,draw:(eye,dt)=>{browserGlobe.draw(eye,dt);needsRender=true;}},
     scores:vrScores,
     siteAt:async(lat,lon)=>{
@@ -870,7 +871,9 @@ async function main() {
   let siteApi: Promise<import('./api/siteApi').SiteApi> | null = null;
   (window as any).__moon.siteApi = () =>
     (siteApi ??= import('./api/siteApi')
-      .then((m) => m.createSiteApi({ baseUrl: import.meta.env.BASE_URL, terrainUrl }))
+      .then((m) => m.createSiteApi({
+        baseUrl: import.meta.env.BASE_URL, terrainUrl, loadedHeightTile: tree.decodedHeight.bind(tree),
+      }))
       .catch((e) => {
         siteApi = null; // a failed load may be tried again
         throw e;

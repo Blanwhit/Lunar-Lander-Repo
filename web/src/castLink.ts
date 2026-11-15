@@ -103,7 +103,6 @@ export function sendCastFrame(time:number, sample:()=>SceneFrame) {
     // Unordered poses expire on the next XR tick. Never queue a stale pose behind a slow link.
     if(outgoing.bufferedAmount>8192)return;
     const f=sample();
-    if(f.mode==='globe' && capture)stopEye();
     const data=packed?pack(f):JSON.stringify(f);
     if(typeof data==='string')outgoing.send(data);else outgoing.send(data);
   }else relay?.(time,sample);

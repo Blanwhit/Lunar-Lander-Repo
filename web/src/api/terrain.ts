@@ -6,8 +6,10 @@
 // missing (see TileTerrain.until()). A miss records the whole chain down to the requested
 // level, so one fetch round loads every level a lookup needs (not one level per round).
 import { GRID, TILE_N, type Vec3 } from '../geom';
-import { decodeHeightTile, type DecodedHeightTile } from '../terrain/heightCodec';
+import { readHeightTile, type DecodedHeightTile } from '../terrain/heightCodec';
 import type { LoadedTile, TileLoader } from './tilePool';
+
+export type LoadedHeightTile = (level: number, face: number, x: number, y: number) => DecodedHeightTile | undefined;
 
 export interface TerrainTile extends DecodedHeightTile {
   /** loaded children (index (cy << 1) | cx); undefined = not loaded yet, null = none */
@@ -51,24 +53,31 @@ export class TileTerrain {
   loader: TileLoader | undefined;
 
   /** @param baseUrl URL of the tile pyramid (the folder containing h/, meta.json) */
-  constructor(private baseUrl: string, private fetchImpl: typeof fetch = fetch.bind(globalThis)) {}
+  constructor(private baseUrl: string, private fetchImpl: typeof fetch = fetch.bind(globalThis),
+    private loadedHeightTile?: LoadedHeightTile) {}
 
   // ---------------------------------------------------------------- loading
-  /** fetch + decode a tile file on this thread */
+  /** fetch a tile file on this thread; its grid is decoded when a lookup first reads it */
   readonly fetchLocal: TileLoader = async (url): Promise<LoadedTile> => {
     const r = await this.fetchImpl(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const buf = await r.arrayBuffer();
-    return { tile: await decodeHeightTile(buf), bytes: buf.byteLength };
+    return { tile: await readHeightTile(buf), bytes: buf.byteLength };
   };
 
   private async loadTile(L: number, f: number, x: number, y: number): Promise<void> {
-    const url = `${this.baseUrl}h/${L}/${f}/${y}/${x}.bin`;
-    const loaded = await (this.loader ?? this.fetchLocal)(url).catch((e) => {
-      throw new Error(`height tile ${L}/${f}/${x}/${y}: ${e instanceof Error ? e.message : e}`);
-    });
-    this.bytesLoaded += loaded.bytes;
-    const t = loaded.tile as TerrainTile;
+    // a grid the viewer already holds needs no fetch
+    const resident = this.loadedHeightTile?.(L, f, x, y);
+    let t: TerrainTile;
+    if (resident) t = { ...resident } as TerrainTile;
+    else {
+      const url = `${this.baseUrl}h/${L}/${f}/${y}/${x}.bin`;
+      const loaded = await (this.loader ?? this.fetchLocal)(url).catch((e) => {
+        throw new Error(`height tile ${L}/${f}/${x}/${y}: ${e instanceof Error ? e.message : e}`);
+      });
+      this.bytesLoaded += loaded.bytes;
+      t = loaded.tile as TerrainTile;
+    }
     t.children = t.childMask ? [undefined, undefined, undefined, undefined] : [null, null, null, null];
     this.tilesLoaded++;
     if (L === 0) {
@@ -139,11 +148,11 @@ export class TileTerrain {
   // ---------------------------------------------------------------- sampling
   /**
    * Height at a body-frame unit direction from the deepest loaded tile with level <= maxLevel.
-   * Missing tiles on the way down are recorded for fetchWanted(). Returns NaN only if the
-   * face's root tile is not loaded yet.
+   * Missing tiles on the way down are recorded for fetchWanted(). Returns NaN if the root
+   * is missing or the tile cannot reach the optional minimum height.
    */
-  sample(dir: Vec3, maxLevel: number): Sample {
-    const h = this.sampleAt(dir[0], dir[1], dir[2], maxLevel);
+  sample(dir: Vec3, maxLevel: number, minHeight = -Infinity): Sample {
+    const h = this.sampleAt(dir[0], dir[1], dir[2], maxLevel, minHeight);
     return { h, level: this.hitLevel };
   }
 
@@ -152,7 +161,7 @@ export class TileTerrain {
    * numbers, the height returned and the serving tile's level left in `hitLevel`, so a
    * lookup allocates nothing. Same result as sample().
    */
-  sampleAt(x: number, y: number, z: number, maxLevel: number): number {
+  sampleAt(x: number, y: number, z: number, maxLevel: number, minHeight = -Infinity): number {
     // direction -> face + face coords: geom.dirToFace, inlined (keep the two in sync)
     const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
     let face: number, dn: number, u: number, v: number;
@@ -195,7 +204,9 @@ export class TileTerrain {
     }
     this.last = t;
     this.hitLevel = t.level;
-    return bilinear(t, a, b);
+    // The header bounds the interior before quantisation. One quantum of slack
+    // also covers rounding. The caller only uses heights above its cutoff.
+    return t.hmax + t.step < minHeight ? NaN : bilinear(t, a, b);
   }
 
   private want(face: number, a: number, b: number, from: number, maxLevel: number) {

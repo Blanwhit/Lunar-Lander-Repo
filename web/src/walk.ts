@@ -516,7 +516,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
   let anchorX=0,anchorZ=0,relocating=false;
   let refreshing: Promise<void> | undefined;
   let choosingLanding = false;
-  let returnArmed: XRInputSource | undefined;
   let queuedHit:Vector3|undefined;
   let lastLocationTime=-Infinity;
   syncScreenToggle();
@@ -623,7 +622,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
     }
   }
   function resetControls() {
-    returnArmed = undefined;
     keys.clear();
     gait.reset();
     pointers.reset();
@@ -859,7 +857,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       const space = renderer.xr.getReferenceSpace();
       const pose = viewer = space ? frame.getViewerPose(space) ?? null : null;
       if (!pose || activeSession.visibilityState !== 'visible') {
-        returnArmed = undefined;
         pointers.reset();
         samples.release(); terrainPointer.hide(); suit.resetFeet();
         return;
@@ -895,11 +892,6 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
           }
           if (input.handedness === 'left') {
             running = !!pad.buttons[1]?.pressed;
-            if (!pad.buttons[5]?.pressed) returnArmed = input;
-            else if (returnArmed === input && !choosingLanding && !relocating) {
-              requestGlobe();
-              return;
-            }
           }
         }
         const gripPose = input.gripSpace && space && frame.getPose(input.gripSpace, space);

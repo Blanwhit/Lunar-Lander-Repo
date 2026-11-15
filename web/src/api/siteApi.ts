@@ -24,7 +24,7 @@ import { Matrix3, Vector3 } from 'three';
 import { Ephemeris } from '../ephemeris';
 import { R_MOON, TILE_N, latLonToDir, texelSize, type Vec3 } from '../geom';
 import { moonOrientation, type OrientationProvider } from '../orientation';
-import { TileTerrain } from './terrain';
+import { TileTerrain, type LoadedHeightTile } from './terrain';
 import { createTilePool } from './tilePool';
 import { albedo, simulateRegolith, simulateRegolithSeries } from './thermal';
 import { DEFAULT_FEASIBILITY, feasibility, type FeasibilityConfig, type FeasibilityInputs, type FeasibilityResult } from './feasibility';
@@ -195,6 +195,8 @@ export interface SiteApiOptions {
   /** base URL of the static site (the folder containing tiles/ and ephem/) */
   baseUrl: string;
   terrainUrl?: string;
+  /** Already-decoded grids from the same terrain pyramid, when running in the viewer. */
+  loadedHeightTile?: LoadedHeightTile;
   fetch?: typeof fetch;
   orientation?: OrientationProvider;
   temperatureModel?: TemperatureModel;
@@ -276,7 +278,7 @@ function localFrame(lat: number, lon: number): Frame {
 export function createSiteApi(opts: SiteApiOptions): SiteApi {
   const base = opts.baseUrl.endsWith('/') ? opts.baseUrl : opts.baseUrl + '/';
   const fetchImpl = opts.fetch ?? fetch.bind(globalThis);
-  const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl);
+  const terrain = new TileTerrain(opts.terrainUrl ?? base + 'tiles/', fetchImpl, opts.loadedHeightTile);
   // decode height tiles in parallel workers where there are any (a caller's own fetch stays in charge)
   if (!opts.fetch) terrain.loader = createTilePool(terrain.fetchLocal) ?? undefined;
   const ephem = new Ephemeris(base + 'ephem/', fetchImpl);
@@ -358,7 +360,8 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
         const th = d / R_MOON;
         const c = Math.cos(th), s = Math.sin(th);
         const L = levelAt(d);
-        terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L);
+        // (a lookup only: with this cutoff no grid is read, so none is decoded for it)
+        terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L, Infinity);
         d += Math.max((TILE_N / 4) * texelSize(L), d * 0.01);
       }
     }
@@ -413,8 +416,17 @@ export function createSiteApi(opts: SiteApiOptions): SiteApi {
           }
           if (nOpen === 0) break;
           const L = levelAt(d);
+          // A point can raise a height's horizon only if its radius exceeds
+          // r0 / (cos(th) - best * sin(th)). A tile that stays below that for every height
+          // still marching is not read (NaN); 1 mm guards floating-point ties.
+          let minHeight = Infinity;
+          for (let j = 0; j < m; j++) {
+            if (!open[j]) continue;
+            const hj = r0[j] / (c - best[j] * s) - R_MOON - 0.001;
+            if (hj < minHeight) minHeight = hj;
+          }
           const misses = terrain.misses;
-          const h = terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L);
+          const h = terrain.sampleAt(up.x * c + hx * s, up.y * c + hy * s, up.z * c + hz * s, L, minHeight);
           if (clean && terrain.misses !== misses) {
             // first miss: resume here (the stops above are final, this sample is not);
             // the rest of this pass only finds out which other tiles the ray needs

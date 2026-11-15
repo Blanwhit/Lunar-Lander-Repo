@@ -65,8 +65,7 @@ export function* gridRows(src: Uint8Array, height: number, width: number,
   rp += 4;
   let bitPos = (pos + ransLen) * 8;
 
-  const signed = out instanceof Int16Array;
-  const fold = signed ? (v: number) => ((v + 32768) & 0xffff) - 32768 : (v: number) => v & 0xffff;
+  const signBias = out instanceof Int16Array ? 32768 : 0;
   const zw = width + 4; // zigzag rows with 2 columns of zero padding on each side
   const z = new Int32Array((height + 2) * zw);
   const q = new Int32Array(height * width); // values before the lattice is applied
@@ -75,7 +74,7 @@ export function* gridRows(src: Uint8Array, height: number, width: number,
   const [c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10] = ls ? coef : new Float64Array(11);
   const W1 = width, W2 = 2 * width;
 
-  for (let j = 0; j < height; j++) {
+  function decodeRow(j: number) {
     const zr = (j + 2) * zw;
     for (let i = 0; i < width; i++) {
       const k = zr + i + 2;
@@ -87,8 +86,11 @@ export function* gridRows(src: Uint8Array, height: number, width: number,
       while (x < RANS_L) x = (x << 8) | src[rp++];
       if (t >= 16) {
         const ne = ((t - 16) >> 1) + 3;
-        let v = 0;
-        for (let b = 0; b < ne; b++, bitPos++) v |= ((src[bitPos >> 3] >> (bitPos & 7)) & 1) << b;
+        // A 16-bit zigzag value has at most 14 extra bits, even across a byte boundary.
+        const byte = bitPos >>> 3;
+        const bits = src[byte] | (src[byte + 1] << 8) | (src[byte + 2] << 16);
+        const v = (bits >>> (bitPos & 7)) & ((1 << ne) - 1);
+        bitPos += ne;
         t = ((2 | (t & 1)) << ne) | v;
       }
       z[k] = t;
@@ -109,10 +111,13 @@ export function* gridRows(src: Uint8Array, height: number, width: number,
           + c8 * (q[n + 2] - w) + c9 * (q[nn - 2] - w) + c10 * (q[nn + 2] - w);
         p = w + Math.floor((acc + FRAC_HALF) / FRAC_DIV);
       } else p = q[k - 1] + q[k - width] - q[k - width - 1];
-      const v = fold(p + r);
+      const v = ((p + r + signBias) & 0xffff) - signBias;
       q[k] = v;
       out[k] = v * g + rem;
     }
+  }
+  for (let j = 0; j < height; j++) {
+    decodeRow(j);
     yield j + 1;
   }
 }
