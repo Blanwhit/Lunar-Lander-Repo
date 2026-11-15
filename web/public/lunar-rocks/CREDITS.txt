@@ -1,0 +1,38 @@
+Apollo lunar rock scans and photographic textures
+
+NASA Astromaterials 3D
+NASA/These 3D reconstructed image data were produced at the Lunar Sample Laboratory Facility for Astromaterials 3D in NASA’s Acquisition & Curation Office and were funded by NASA Planetary Data Archiving, Restoration, and Tools Program, Proposal No.: 15-PDART15_2-0041.
+
+Apollo 15, 15016,0 — low-Ti olivine basalt
+https://ares.jsc.nasa.gov/astromaterials3d/sample-details.htm?sample=15016-0
+Apollo 14, 14316,0 — regolith breccia
+https://ares.jsc.nasa.gov/astromaterials3d/sample-details.htm?sample=14316-0
+Apollo 16, 60025,241 — ferroan anorthosite
+https://ares.jsc.nasa.gov/astromaterials3d/sample-details.htm?sample=60025-241
+
+The wrist display reports the approximate physical dimensions of each curated
+piece as scanned. The coordinate-registered OBJ files above and their Model
+Parameters PDFs specify metres. We projected the original mesh vertices onto
+their three principal axes, took the span along each axis, and converted to
+centimetres before resizing the meshes for the simulation. Values are rounded
+to the nearest millimetre.
+
+NASA identifies these data as public domain and requests attribution.
+https://ares.jsc.nasa.gov/astromaterials3d/faqs.htm
+https://www.nasa.gov/nasa-brand-center/images-and-media/
+
+The VR viewer uses reduced meshes and photographic textures from the three returned specimens. Instances are oriented and placed by the simulation. Their regional size and spacing estimates use the survey data below.
+
+Regional rock populations
+
+LRO Diviner team, NASA PDS. Product DGDR_RA_AVG_CYL_128, version 6.
+Converted to a regional mean cover grid and two native-resolution patches.
+https://pds-geosciences.wustl.edu/lro/urn-nasa-pds-lro_diviner_derived1/data_derived_gdr_l3/cylindrical/jp2/dgdr_ra_avg_cyl_128_jp2.lbl
+
+Ben Aussel (2025). Global Lunar Boulder Map from LRO NAC optical images.
+Three density bands converted to a quantized atlas. Global cumulative diameter table included.
+https://doi.org/10.5281/zenodo.15520275
+CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+
+Li & Wu (2018). Lunar rock size distribution used to estimate unresolved populations.
+https://doi.org/10.1029/2017JE005496

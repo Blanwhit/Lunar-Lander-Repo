@@ -1,0 +1,14 @@
+Astronaut by Poly by Google, distributed by Google's <model-viewer> project.
+Original model and Creative Commons Attribution license: https://poly.pizza/m/dLHpzNdygsg
+Source: https://github.com/google/model-viewer/blob/master/packages/shared-assets/models/Astronaut.glb
+Viewer adaptation: first-person helmet cutaway, fitted limb skeleton, and procedural walking, running and jumping poses.
+
+eva-suit.glb
+Extravehicular Mobility Unit by NASA / Michael D. Carbajal
+Model and source: https://science.nasa.gov/3d-resources/extravehicular-mobility-unit/
+NASA 3D Resources: https://science.nasa.gov/3d-resources/
+
+Lunar Walk adapted the EMU body and gloves to its first-person skeleton, removed
+the helmet and maneuvering unit, and added lunar overboots, tread, gaiters,
+pockets, cloth folds and woven material. The avatar combines an orbital EVA suit
+reference with purpose-built surface footwear.

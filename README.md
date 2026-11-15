@@ -22,6 +22,16 @@ bar along the bottom:
   Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
   `#2,84,40000,270,82,2026-01-10T12:00Z`.
 
+## Surface walking in VR
+
+Open the HTTPS Site directly in a WebXR headset browser. Click or tap any point on the globe, choose **Walk on the Moon**, then select **Enter VR**. Drag the globe to see the far side. Physical steps move the viewpoint. On Quest 2 the left stick steers, the right stick turns, the left grip runs with stick input, and A jumps. Hold the right index trigger to sprint forward, or steer the sprint with the left stick. Releasing the trigger preserves airborne momentum and lets foot contact slow the astronaut toward the selected walking pace or a stop. A running jump carries your horizontal velocity through flight. The suit follows your head and controller positions. On desktop, click terrain to travel, drag to look, move with WASD or the arrow keys, hold Shift to run, and press Space to jump.
+
+In a Quest session, raise the left wrist to read the navigator. Aim the right controller at terrain, hold **B** to preview the point, and release **B** to mark it. The wrist shows surface distance, bearing, elevation difference and approach direction. Crouch and hold the **right grip** against a loose rock to lift it. Turn your hand to inspect the scan and release the grip while moving to toss it. The wrist identifies its Apollo source and the dimensions of the original curated piece. The helmet soundscape models ventilation, breathing and transmitted boot impacts. Each boot contact pulses its corresponding controller when haptics are available.
+
+The surface view reports east-positive longitude, latitude, elevation above the 1,737.4 km lunar reference sphere, and approximate elevation-grid spacing. It uses measured topography at its geographic location, including lunar curvature. The terrain around a landing can load a roughly 167 m LOLA grid. A bundled 948 m grid covers the whole Moon, with finer local and polar data where available. The surface readout shows regional rock cover from Diviner and the surveyed density of boulders at least 4.5 m across where LROC imagery provides counts. Elsewhere it labels the estimate. Individual rock positions, grains and footprints are simulated. Choose **Selected UTC** to match the orbital Sun or **Simulated daylight** for an illuminated walk.
+
+To regenerate the walking grids from the full local tile build, run `.venv/bin/python pipeline/export_walk_terrain.py` and `.venv/bin/python pipeline/export_walk_regions.py` from the repository root. The hosted headset test includes orbital tile levels 0–2 and the full walking grids. The local build includes the complete orbital tile pyramid.
+
 ## Run
 
 Prerequisites: Python 3.11+, Node 18/20/22+ (Vite 6), and g++ (MinGW is fine on
@@ -121,8 +131,8 @@ after lossless compaction:
    trilinearly like the heights and stored as KTX2 with mipmaps: ETC1S for L0–L1 (small initial
    load) and UASTC + zstd for L2–L5 (no chroma blocking when magnified). Deeper tiles reuse the L5
    texture with a UV transform.
-5. **Stars**: the SVS Deep Star Map (J2000) is resampled into OpenGL-convention cubemaps. A
-   512² cubemap loads first and a 2048² one afterwards.
+5. **Stars** use NASA’s 16K celestial map. A 512² cubemap covers the first frames while the
+   viewer loads the 4096² sky independently of terrain. A 2048² version serves smaller GPUs.
 6. **Ephemeris** ([ephemeris.py](pipeline/ephemeris.py)): the Horizons API sends no CORS
    headers, so the browser can't query it live. The pipeline fetches Moon-centred (`500@301`),
    light-time-corrected ICRF state vectors (position + velocity) of the Sun and the Earth every
@@ -244,7 +254,7 @@ so the terrain cost dominates. They haven't been re-measured.
   Before this throttle, frames during fast flights spiked to 87–132 ms p95. With it they stay at
   5–6 ms.
 
-### Initial payload (production build, measured)
+### Initial payload (original browser build, measured)
 
 Everything fetched until the first frame that has all six L0 terrain tiles, their colour, the
 star background and the Sun/Earth positions. The 80 KB Earth texture loads right after:
@@ -260,8 +270,7 @@ star background and the Sun/Earth positions. The 80 KB Earth texture loads right
 | **total** | **1.47 MB** (1.20 MB with gzipped wasm) |
 
 On localhost the first full frame, including the Sun and Earth, appears about 0.13–0.35 s after
-the app starts. Refinement requests are held back until the base level is complete. The 4.3 MB
-2048² star cubemap is fetched only once the tile queue is idle.
+the app starts. Refinement requests are held back until the base level is complete. These measurements predate the VR branch’s higher-resolution sky.
 
 ### Visual verification (automated captures)
 

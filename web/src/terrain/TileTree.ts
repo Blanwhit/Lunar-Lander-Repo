@@ -213,6 +213,7 @@ export interface FrameInfo {
 
 export class TileTree {
   readonly roots: TileNode[];
+  readonly picking = {value:false};
   private nodes = new Map<string, TileNode>();
   private workers: Worker[] = [];
   private workerBusy: number[] = [];
@@ -291,8 +292,8 @@ export class TileTree {
     return Math.max((P * t) / this.opts.pixelsPerTexel, 2.5 * TILE_N * Math.SQRT2 * t);
   }
 
-  update(fi: FrameInfo): TileNode[] {
-    this.drainArrivals();
+  update(fi: FrameInfo, moving = false): TileNode[] {
+    this.drainArrivals(moving);
     const P = fi.viewportHeight / (2 * Math.tan(fi.fovY / 2));
     this.tmpM.setFromMatrix3(fi.viewRot);
     this.tmpM.premultiply(fi.proj);
@@ -447,15 +448,17 @@ export class TileTree {
   }
 
   /** promote a few finished downloads per frame (bounded GPU upload work per frame) */
-  private drainArrivals() {
+  private drainArrivals(moving: boolean) {
     const t0 = performance.now();
     let k = 0;
-    while (this.arrivals.length && (k < 2 || performance.now() - t0 < 3) && k < 8) {
+    const heightLimit = moving && this.baseReady ? 2 : 8;
+    while (this.arrivals.length && (k < 2 || performance.now() - t0 < 3) && k < heightLimit) {
       this.onHeight(this.arrivals.shift()!);
       k++;
     }
     k = 0;
-    while (this.colourArrivals.length && k < 4) {
+    const colourLimit = moving && this.baseReady ? 1 : 4;
+    while (this.colourArrivals.length && k < colourLimit) {
       const [n, tex] = this.colourArrivals.shift()!;
       if (n.colourState === LOADING) {
         n.colourTex = tex;
@@ -561,6 +564,7 @@ export class TileTree {
         vertexShader: terrainVS,
         fragmentShader: terrainFS,
         uniforms: {
+          uPickDistance: this.picking,
           uProj: { value: new Matrix4() },
           uViewRot: { value: new Matrix3() },
           uN: { value: new Vector3(...F.n) },

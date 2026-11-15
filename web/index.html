@@ -3,13 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Moon</title>
+    <title>Lunar Walk</title>
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
       canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
+      .landing { position: fixed; z-index: 3; color: #eee; font: 14px/1.4 system-ui,sans-serif; color-scheme: dark; }
+      .landing-hint { position: fixed; top: max(12px, env(safe-area-inset-top)); left: 12px; padding: 5px 9px; background: #16181bd9; border-radius: 5px; pointer-events: none; }
+      #landing { position: fixed; display: grid; gap: 7px; width: min(208px, calc(100vw - 40px)); box-sizing: border-box; padding: 10px; border: 1px solid #55595d; border-radius: 9px; background: #181a1df5; }
+      #landing[hidden], .landing [hidden] { display: none; }
+      #landing label, #landing output, #landing .coordinates { font-size: 12px; color: #c9cbd0; }
+      #landing select, #landing button { font: inherit; border-radius: 5px; padding: 6px; }
+      #landing button { cursor: pointer; font-weight: 600; border: 0; background: #edf0ee; color: #111315; }
+      #landing output:empty { display: none; }
     </style>
   </head>
   <body>
+    <div class="landing">
+      <span class="landing-hint">Select a point on the Moon. Drag to rotate.</span>
+      <form id="landing" aria-label="Selected landing point" hidden>
+        <span class="coordinates"></span>
+        <button type="submit" disabled>Walk on the Moon</button>
+        <label>Surface lighting
+          <select name="lighting"><option value="day">Simulated daylight</option><option value="utc">Selected UTC</option></select>
+        </label>
+        <output role="status"></output>
+      </form>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

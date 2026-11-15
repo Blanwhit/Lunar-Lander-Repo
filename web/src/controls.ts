@@ -1,5 +1,5 @@
-import { Matrix3, Quaternion, Vector3 } from 'three';
-import { R_MOON, Vec3 } from './geom';
+import { Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
+import { latLonToDir, R_MOON, Vec3 } from './geom';
 
 // Globe controls in the lunar body frame.
 // The camera orbits a pivot on the surface (target direction `tgt`) at distance `dist`,
@@ -23,6 +23,11 @@ export class GlobeControls {
   tiltUser = 0;
   tiltGoal = 0;
   minDist = 60;
+  private zoomVelocity = 0;
+  private turn?: { from: Quaternion; to: Quaternion; elapsed: number };
+  onSurfaceZoom?: () => void;
+  onSurfaceTap?: (x:number,y:number) => void;
+  private tap?: {id:number;x:number;y:number};
   maxDist = 8e6;
   minClearance = 15; // m above terrain
   pivotHeight = 0;
@@ -49,17 +54,34 @@ export class GlobeControls {
   }
 
   setView(latDeg: number, lonDeg: number, dist: number, headingDeg = 0, tiltDeg?: number) {
+    this.turn = undefined;
     const la = latDeg * DEG, lo = lonDeg * DEG;
     this.tgt.set(Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la));
     const { east, north } = this.frameAt(this.tgt);
     this.fwd.copy(north).multiplyScalar(Math.cos(headingDeg * DEG)).addScaledVector(east, Math.sin(headingDeg * DEG));
     this.dist = Math.min(this.maxDist, Math.max(this.minDist, dist));
     this.logDistGoal = Math.log(this.dist);
+    this.zoomVelocity = 0;
     if (tiltDeg !== undefined) this.tiltUser = this.tiltGoal = tiltDeg * DEG - this.autoTilt(this.dist);
     this.northing = false;
     this.omega.set(0, 0, 0);
     this.headingVel = 0;
     this.changed = true;
+  }
+
+  orientation() {
+    const right = this.fwd.clone().cross(this.tgt).normalize();
+    return new Quaternion().setFromRotationMatrix(new Matrix4().makeBasis(right, this.tgt, this.fwd.clone().negate()));
+  }
+
+  faceLocation(lat: number, lon: number) {
+    const up = new Vector3(...latLonToDir(lat,lon));
+    const east = new Vector3(-Math.sin(lon*DEG), Math.cos(lon*DEG), 0);
+    const to = new Quaternion().setFromRotationMatrix(new Matrix4().makeBasis(east, up, east.clone().cross(up)));
+    this.turn = { from: this.orientation(), to, elapsed: 0 };
+    this.omega.set(0,0,0);
+    this.headingVel = 0;
+    this.northing = false;
   }
 
   private frameAt(up: Vector3) {
@@ -93,6 +115,7 @@ export class GlobeControls {
 
   /** smoothly turn the view so north is up (keeps position, zoom and tilt) */
   resetNorth() {
+    this.turn = undefined;
     this.headingVel = 0;
     this.northing = true;
     this.changed = true;
@@ -100,6 +123,9 @@ export class GlobeControls {
 
   // --------------------------------------------------------------- events
   private onDown = (e: PointerEvent) => {
+    this.turn = undefined;
+    this.tap = this.pointers.size===0 && e.button===0 && !e.shiftKey && !e.ctrlKey && !e.metaKey
+      ? {id:e.pointerId,x:e.clientX,y:e.clientY} : undefined;
     this.el.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.dragging = true;
@@ -112,6 +138,8 @@ export class GlobeControls {
   };
 
   private onUp = (e: PointerEvent) => {
+    const tap=this.tap;
+    this.tap=undefined;
     this.pointers.delete(e.pointerId);
     this.pinch = null;
     if (this.pointers.size === 0) {
@@ -121,6 +149,9 @@ export class GlobeControls {
         this.omega.set(0, 0, 0);
         this.headingVel = 0;
       }
+    }
+    if (e.type==='pointerup' && tap?.id===e.pointerId && Math.hypot(e.clientX-tap.x,e.clientY-tap.y)<=5) {
+      this.onSurfaceTap?.(e.clientX,e.clientY);
     }
   };
 
@@ -132,6 +163,10 @@ export class GlobeControls {
   private onMove = (e: PointerEvent) => {
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
+    if (this.tap) {
+      if (Math.hypot(e.clientX-this.tap.x,e.clientY-this.tap.y)<=5) return;
+      this.tap=undefined;
+    }
     const dx = e.clientX - p.x;
     const dy = e.clientY - p.y;
     p.x = e.clientX;
@@ -146,8 +181,7 @@ export class GlobeControls {
       const d = Math.hypot(vx, vy);
       const ang = Math.atan2(vy, vx);
       if (this.pinch) {
-        this.logDistGoal -= Math.log(d / Math.max(1, this.pinch.d));
-        this.clampGoal();
+        this.zoomBy(-Math.log(Math.max(1,d) / Math.max(1,this.pinch.d)));
         let da = ang - this.pinch.ang;
         if (da > Math.PI) da -= 2 * Math.PI;
         if (da < -Math.PI) da += 2 * Math.PI;
@@ -188,12 +222,16 @@ export class GlobeControls {
     let dy = e.deltaY;
     if (e.deltaMode === 1) dy *= 30;
     else if (e.deltaMode === 2) dy *= 300;
-    this.logDistGoal += Math.max(-300, Math.min(300, dy)) * 0.0022;
-    this.clampGoal();
+    this.zoomBy(Math.max(-300, Math.min(300, dy)) * 0.0022);
     this.changed = true;
   };
 
-  private clampGoal() {
+  private zoomBy(delta: number) {
+    if (delta < 0 && this.dist <= this.minDist * 1.04 && this.logDistGoal <= Math.log(this.minDist) + 0.001) {
+      this.onSurfaceZoom?.();
+      return;
+    }
+    this.logDistGoal += delta;
     this.logDistGoal = Math.min(Math.log(this.maxDist), Math.max(Math.log(this.minDist), this.logDistGoal));
   }
 
@@ -215,6 +253,16 @@ export class GlobeControls {
   update(dt: number): boolean {
     let moved = this.changed;
     this.changed = false;
+    if (this.turn) {
+      const turn = this.turn;
+      turn.elapsed = Math.min(1, turn.elapsed + dt / 0.85);
+      const t = turn.elapsed;
+      this.q.slerpQuaternions(turn.from, turn.to, t*t*(3-2*t));
+      this.tgt.set(0,1,0).applyQuaternion(this.q);
+      this.fwd.set(0,0,-1).applyQuaternion(this.q);
+      if (t === 1) this.turn = undefined;
+      moved = true;
+    }
     if (!this.dragging) {
       const w = this.omega.length();
       if (w > 1e-9) {
@@ -246,11 +294,18 @@ export class GlobeControls {
     // smooth zoom
     const ld = Math.log(this.dist);
     const diff = this.logDistGoal - ld;
-    if (Math.abs(diff) > 1e-4) {
-      this.dist = Math.exp(ld + diff * (1 - Math.exp(-dt * 10)));
+    if (Math.abs(diff) > 1e-4 || Math.abs(this.zoomVelocity) > 1e-3) {
+      // Exact critically damped spring in log distance, independent of frame rate.
+      // Limit catch-up after a burst of wheel events or a missed animation frame.
+      const step = Math.min(dt,1/30), stiffness = 12, decay = Math.exp(-stiffness * step);
+      const offset = Math.max(-.85,Math.min(.85,diff));
+      const transient = this.zoomVelocity - stiffness * offset;
+      this.dist = Math.exp(ld + offset + (-offset + transient * step) * decay);
+      this.zoomVelocity = (this.zoomVelocity - stiffness * transient * step) * decay;
       moved = true;
     } else if (diff !== 0) {
       this.dist = Math.exp(this.logDistGoal);
+      this.zoomVelocity = 0;
       moved = true;
     }
     // pivot height follows the terrain

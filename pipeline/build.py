@@ -288,9 +288,10 @@ def cmd_colour(args) -> None:
 def cmd_stars(args) -> None:
     import cv2
     from PIL import Image
-    img = read_exr_rgb(RAW / CFG["stars"]["exr"]).astype(np.float32)
+    img = read_exr_rgb(RAW / CFG["stars"]["exr"])
     H, W = img.shape[:2]
-    lum = img.mean(axis=2)
+    # A stratified sample keeps the 16K sky calibration within laptop memory.
+    lum = img[::4, ::4].mean(axis=2, dtype=np.float32)
     p50, p99, p9999 = np.percentile(lum, [50, 99, 99.99])
     print(f"star map {W}x{H}: p50 {p50:.4g} p99 {p99:.4g} p99.99 {p9999:.4g}")
     # display transform: black point at the median sky (so the background is black and
@@ -306,39 +307,38 @@ def cmd_stars(args) -> None:
     for size in CFG["stars"]["face_sizes"]:
         faces = []
         s = (np.arange(size) + 0.5) / size * 2 - 1
-        sc, tc = np.meshgrid(s, s)  # row = t, col = s
-        one = np.ones_like(sc)
-        # OpenGL cube map conventions (row 0 = t = -1 side)
-        dirs = [
-            np.stack([one, -tc, -sc], -1),   # +X
-            np.stack([-one, -tc, sc], -1),   # -X
-            np.stack([sc, one, tc], -1),     # +Y
-            np.stack([sc, -one, -tc], -1),   # -Y
-            np.stack([sc, -tc, one], -1),    # +Z
-            np.stack([-sc, -tc, -one], -1),  # -Z
-        ]
         # area-filter the source to roughly the face resolution
         src_res = 360.0 / W
         face_res = 90.0 / size
         src = img
         if face_res > 1.5 * src_res:
             f = int(face_res / src_res)
-            src = cv2.resize(img, (W // f, H // f), interpolation=cv2.INTER_AREA)
+            src = cv2.resize(img.astype(np.float32), (W // f, H // f), interpolation=cv2.INTER_AREA)
+        else:
+            src = img.astype(np.float32, copy=False)
         h2, w2 = src.shape[:2]
-        for fi, d in enumerate(dirs):
-            d = d / np.linalg.norm(d, axis=-1, keepdims=True)
-            dec = np.degrees(np.arcsin(np.clip(d[..., 2], -1, 1)))
-            ra = np.degrees(np.arctan2(d[..., 1], d[..., 0])) % 360
-            # map centred on RA 0h, RA increasing to the left
-            col = ((180.0 - ra) % 360.0) / 360.0 * w2 - 0.5
-            row = (90.0 - dec) / 180.0 * h2 - 0.5
-            v = cv2.remap(src, col.astype(np.float32), row.astype(np.float32), cv2.INTER_LINEAR,
-                          borderMode=cv2.BORDER_WRAP)
-            rgb = np.round(np.clip(tone(v), 0, 1) * 255).astype(np.uint8)
+        # Project one strip at a time so 4K faces fit in memory on a laptop.
+        for fi in range(6):
+            rgb = np.empty((size, size, 3), dtype=np.uint8)
+            for start in range(0, size, 128):
+                sc, tc = np.meshgrid(s, s[start:start + 128])
+                one = np.ones_like(sc)
+                # Directions for +X, -X, +Y, -Y, +Z and -Z respectively.
+                x, y, z = ((one, -tc, -sc), (-one, -tc, sc),
+                           (sc, one, tc), (sc, -one, -tc),
+                           (sc, -tc, one), (-sc, -tc, -one))[fi]
+                dec = np.degrees(np.arctan2(z, np.hypot(x, y)))
+                ra = np.degrees(np.arctan2(y, x))
+                col = ((180.0 - ra) % 360.0) / 360.0 * w2 - 0.5
+                row = (90.0 - dec) / 180.0 * h2 - 0.5
+                v = cv2.remap(src, col.astype(np.float32), row.astype(np.float32),
+                              cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+                rgb[start:start + len(tc)] = np.round(tone(v) * 255).astype(np.uint8)
             p = CACHE / "stars" / f"stars{size}_{fi}.png"
             p.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(rgb).save(p)
             faces.append(p)
+        del src
         out_dir = CACHE / "stars_ktx2"
         mode = CFG["stars"].get("basis_hi", ["-uastc", "-uastc_level", "2", "-uastc_rdo_l", "2.0"]) if size > 1024 else ["-q", "255"]
         _basisu(faces, out_dir, ["-tex_type", "cubemap", "-linear", *mode])

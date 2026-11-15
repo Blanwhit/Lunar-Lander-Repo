@@ -98,12 +98,14 @@ void main() {
 
 export const terrainFS = /* glsl */ `
 precision highp float;
+precision highp int;
 
 in vec2 vUv;
 in vec3 vDir;
 in vec3 vRel;
 in float vMorph;
 
+uniform bool uPickDistance;
 uniform sampler2D uNormal;   // RG16F 257x257 tangent-space normal (e1, e2)
 uniform sampler2D uColour;   // sRGB albedo (decoded to linear by the sampler)
 uniform vec3 uColourXf;      // (scale, offsetU, offsetV): tile uv -> colour tile uv
@@ -124,6 +126,11 @@ vec3 toSRGB(vec3 c) {
 }
 
 void main() {
+  if (uPickDistance) {
+    highp uint bits = floatBitsToUint(length(vRel));
+    fragColor = vec4(uvec4(bits, bits >> 8u, bits >> 16u, bits >> 24u) & 255u) / 255.;
+    return;
+  }
   vec3 up = normalize(vDir);
   vec3 e1 = normalize(uU - up * dot(uU, up));
   vec3 e2 = cross(up, e1);
@@ -198,7 +205,15 @@ vec3 toSRGB(vec3 c) {
 
 void main() {
   vec3 d = normalize(vDirB);
-  vec3 c = texture(uStars, uBodyToJ2000 * d).rgb * uStarGain;   // display-referred
+  vec3 starDir = uBodyToJ2000 * d;
+#ifdef WALK_SKY
+  // Use the pixel's angular footprint to select a continuous LOD across all six faces.
+  float radiansPerPixel = max(length(dFdx(starDir)), length(dFdy(starDir)));
+  float texels = radiansPerPixel * float(textureSize(uStars, 0).x) * 0.5;
+  vec3 c = textureLod(uStars, starDir, log2(max(texels, 1.0))).rgb * uStarGain;
+#else
+  vec3 c = texture(uStars, starDir).rgb * uStarGain;
+#endif
 
   // ---- Sun
   if (uSun.w > 0.0) {
@@ -233,7 +248,8 @@ void main() {
       lit += vec3(0.25, 0.45, 1.0) * limb * 0.35 * day;
       vec3 earth = toSRGB(lit);
       float edge = clamp((uEarth.w - ang) / uPixelAngle + 0.5, 0.0, 1.0);
-      float halo = smoothstep(1.08, 1.0, r) * step(1.0, r) * 0.35 * smoothstep(-0.2, 0.3, dot(normalize(d - uEarth.xyz * ce), uEarthSun));
+      vec3 towardsLimb = q * inversesqrt(max(dot(q, q), 1e-10));
+      float halo = (1.0 - smoothstep(1.0, 1.08, r)) * step(1.0, r) * 0.35 * smoothstep(-0.2, 0.3, dot(towardsLimb, uEarthSun));
       c = mix(c + vec3(0.3, 0.5, 1.0) * halo, earth, edge);
     }
   }

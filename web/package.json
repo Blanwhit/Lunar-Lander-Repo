@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "lerc": "3.0.0",
     "three": "0.187.0"
   },
   "devDependencies": {

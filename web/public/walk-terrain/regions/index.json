@@ -1,0 +1,26 @@
+{
+  "degrees": 15,
+  "width": 481,
+  "step": 8,
+  "offset": 0,
+  "polar": [
+    {
+      "file": "north-cap.bin",
+      "width": 1025,
+      "step": 0.25,
+      "offset": -908,
+      "lat": 90,
+      "lon": 0,
+      "spacing": 160
+    },
+    {
+      "file": "south-cap.bin",
+      "width": 1025,
+      "step": 0.25,
+      "offset": -526,
+      "lat": -90,
+      "lon": 0,
+      "spacing": 160
+    }
+  ]
+}
