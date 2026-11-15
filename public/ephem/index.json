@@ -1,0 +1,11 @@
+{
+ "start": 2000,
+ "end": 2050,
+ "stepHours": 6,
+ "bodies": [
+  "Sun",
+  "Earth"
+ ],
+ "frame": "ICRF, Moon-centred, light-time corrected",
+ "source": "JPL Horizons API (https://ssd.jpl.nasa.gov/api/horizons.api)"
+}
