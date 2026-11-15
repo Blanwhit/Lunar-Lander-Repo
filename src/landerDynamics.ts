@@ -18,18 +18,18 @@ const contacts = [
 /** Sample the locally rendered soil and boulders once per grid vertex. */
 export class LandingBed {
   private samples = new Map<number,Map<number,number>>();
-  constructor(private height: (x:number,z:number)=>number) {}
+  constructor(private height: (x:number,z:number)=>number, private spacing = .18) {}
   private vertex(i:number,j:number) {
     let row = this.samples.get(i);
     if (!row) { row = new Map(); this.samples.set(i,row); }
     let h = row.get(j);
-    if (h === undefined) { h=this.height(i*.18,j*.18); row.set(j,h); }
+    if (h === undefined) { h=this.height(i*this.spacing,j*this.spacing); row.set(j,h); }
     return h;
   }
   at(x:number,z:number,normal?:Vector3) {
-    const gx=x/.18,gz=z/.18,i=Math.floor(gx),j=Math.floor(gz),u=gx-i,v=gz-j;
+    const gx=x/this.spacing,gz=z/this.spacing,i=Math.floor(gx),j=Math.floor(gz),u=gx-i,v=gz-j;
     const a=this.vertex(i,j),b=this.vertex(i+1,j),c=this.vertex(i,j+1),d=this.vertex(i+1,j+1);
-    if(normal) normal.set(-((b-a)*(1-v)+(d-c)*v)/.18,1,-((c-a)*(1-u)+(d-b)*u)/.18).normalize();
+    if(normal) normal.set(-((b-a)*(1-v)+(d-c)*v)/this.spacing,1,-((c-a)*(1-u)+(d-b)*u)/this.spacing).normalize();
     return (a*(1-u)+b*u)*(1-v)+(c*(1-u)+d*u)*v;
   }
 }

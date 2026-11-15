@@ -1,8 +1,9 @@
 import {
-  BufferGeometry, CanvasTexture, DataTexture, EquirectangularReflectionMapping, Float32BufferAttribute,
-  Group, MathUtils, Mesh, MeshStandardMaterial, Points, PointsMaterial, Vector3,
+  DataTexture, EquirectangularReflectionMapping, Float32BufferAttribute,
+  Group, MathUtils, Mesh, MeshStandardMaterial, Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { LandingDust } from './landingDust';
 import { centreHeight, padRadius, LanderDynamics, LandingBed } from './landerDynamics';
 import { LunarObserver } from './lunarObserver';
 
@@ -33,12 +34,7 @@ export class LandingMission {
   readonly lander:Group;
   private environment:DataTexture;
   private surfaces=new Map<MeshStandardMaterial,MeshStandardMaterial>();
-  private dustGeometry=new BufferGeometry();
-  private dustMaterial=new PointsMaterial({color:0xb3aaa0,size:.075,transparent:true,opacity:.57,depthWrite:false});
-  private dust=new Points(this.dustGeometry,this.dustMaterial);
-  private grains=new Float32Array(220*3);
-  private grainDir=new Float32Array(220*2);
-  private dustFade=1;
+  private dust: LandingDust;
   readonly focus=new Vector3();
   private destination=new Vector3();
   private bed!:LandingBed;
@@ -77,17 +73,8 @@ export class LandingMission {
       if(!surface){surface=source.clone();surface.envMap=this.environment;this.surfaces.set(source,surface);}
       node.material=surface;
     });
-    this.group.add(this.lander,this.dust);
-    const grainImage=document.createElement('canvas');grainImage.width=grainImage.height=32;
-    const brush=grainImage.getContext('2d')!,falloff=brush.createRadialGradient(16,16,0,16,16,16);
-    falloff.addColorStop(0,'rgba(255,255,255,.8)');falloff.addColorStop(.35,'rgba(255,255,255,.32)');
-    falloff.addColorStop(1,'rgba(255,255,255,0)');brush.fillStyle=falloff;brush.fillRect(0,0,32,32);
-    this.dustMaterial.map=new CanvasTexture(grainImage);this.dustMaterial.size=.42;
-    this.dust.frustumCulled=false;
-    this.dustGeometry.setAttribute('position',new Float32BufferAttribute(this.grains,3));
-    for(let i=0;i<220;i++){
-      const angle=i*2.399963;this.grainDir[i*2]=Math.sin(angle);this.grainDir[i*2+1]=Math.cos(angle);
-    }
+    this.dust = new LandingDust(this.floor);
+    this.group.add(this.lander,this.dust.mesh);
     this.restart(0,0);
   }
   private reflections(){
@@ -105,7 +92,7 @@ export class LandingMission {
     for(const m of this.surfaces.values())m.envMapIntensity=this.sun.y>0?1.1:.36;
     this.destination.set(x,this.floor(x,z),z);
     this.bed=new LandingBed(this.surface);this.dynamics=new LanderDynamics(this.bed);
-    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dustFade=1;
+    this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dust.reset();
     this.firstProbeContact=undefined;
     for(const probe of this.probes)probe.weights[probe.foldedIndex]=0;
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
@@ -166,7 +153,8 @@ export class LandingMission {
         this.height<12?'Final descent':'Powered descent';
       this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
     }
-    this.updateDust(dt);
+    this.dust.update(dt, this.lander.position, this.lander.quaternion, this.height,
+      this.off || this.inSpace ? 0 : 1, this.sun.y);
   }
   private clearance(local:Vector3){
     const p=this.worldPoint.copy(local).applyQuaternion(this.lander.quaternion).add(this.lander.position);
@@ -196,25 +184,10 @@ export class LandingMission {
     if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=1)return true;
     return solidContacts.some(local=>this.clearance(local)<=0);
   }
-  private updateDust(dt:number){
-    if(this.off)this.dustFade=Math.max(0,this.dustFade-dt*1.8);
-    const intensity=(1-MathUtils.smoothstep(this.height,1,17))*this.dustFade;
-    this.dust.visible=!this.inSpace && intensity>.01;
-    if(!this.dust.visible)return;
-    const pos=this.dustGeometry.getAttribute('position');
-    const x=this.lander.position.x,z=this.lander.position.z;
-    const count=Math.ceil(220*intensity);this.dustGeometry.setDrawRange(0,count);
-    for(let i=0;i<count;i++){
-      const age=(this.time*(.8+(i%7)*.045)+i*.618)%1;
-      const r=.65+age*(6+(i%11)*.65);
-      const px=x+r*this.grainDir[2*i],pz=z+r*this.grainDir[2*i+1];
-      pos.setXYZ(i,px,this.floor(px,pz)+.035+age*(1-age)*(.4+(i%5)*.08),pz);
-    }
-    pos.needsUpdate=true;this.dustMaterial.opacity=.5*intensity;
-  }
+
   dispose(){
     // The shared GLTF owns the geometry and maps. Each mission owns its reflective materials.
     this.environment.dispose();for(const m of this.surfaces.values())m.dispose();
-    this.dustGeometry.dispose();this.dustMaterial.map?.dispose();this.dustMaterial.dispose();this.group.removeFromParent();
+    this.dust.dispose();this.group.removeFromParent();
   }
 }
