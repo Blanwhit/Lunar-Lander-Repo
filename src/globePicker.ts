@@ -142,16 +142,18 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
           const x = pad?.axes[2] ?? 0, y = pad?.axes[3] ?? 0;
           if (Math.abs(x) > .15) moon.rotation.y += x * dt * 1.6;
           if (Math.abs(y) > .15) moon.rotation.x = MathUtils.clamp(moon.rotation.x + y * dt * 1.6, -Math.PI / 2, Math.PI / 2);
-          const aim = left.aim;
           const uiClick = scoreButton?.update(pose, pointers);
-          const click = left.faceClick && !uiClick;
-          const overButton = left.overButton;
-          beam.visible = !!aim && !overButton;
-          dot.visible = false;
-          if (aim && !overButton) {
+          // X selects with the left hand; either hand can inspect a score.
+          let pointed = false;
+          beam.visible = dot.visible = false;
+          for (const hand of pointers.hands) {
+            const aim = hand.aim;
+            if (!aim || hand.overButton || (hand !== left && !scores?.overlay.enabled)) continue;
             ray.origin.copy(aim.transform.position);
             ray.direction.set(0, 0, -1).applyQuaternion(aim.transform.orientation);
             const onMoon = ray.intersectSphere(bounds, hit);
+            if (!onMoon && hand !== left) continue;
+            beam.visible = true;
             if (onMoon) {
               dot.position.copy(hit);
               dot.visible = true;
@@ -161,11 +163,12 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
             line.setXYZ(1, hit.x, hit.y, hit.z);
             line.needsUpdate = true;
             beam.frustumCulled = false;
-            if (onMoon && (click || scores?.overlay.enabled)) {
-              moon.worldToLocal(local.copy(hit)).normalize();
-              if (scores?.overlay.enabled) title = scores.reading([local.x,-local.z,local.y]);
-            }
-            if (click && onMoon) {
+            if (!onMoon) continue;
+            pointed = true;
+            const click = hand === left && left.faceClick && !uiClick;
+            moon.worldToLocal(local.copy(hit)).normalize();
+            if (scores?.overlay.enabled) title = scores.reading([local.x,-local.z,local.y]);
+            if (click) {
               selected = true;
               scoreButton?.hide();
               landingFailed = false;
@@ -187,7 +190,17 @@ export async function showLandingGlobe(renderer: WebGLRenderer, session: XRSessi
                 reject(error);
               });
             }
+            break;
           }
+          if (scores?.overlay.enabled && !selected) {
+            if (!pointed) {
+              // While pointing at a HUD button, report the point facing the viewer.
+              local.copy(pose.transform.position).sub(bounds.center).setLength(radius).add(bounds.center);
+              moon.worldToLocal(local).normalize();
+              title = scores.reading([local.x,-local.z,local.y], 'Globe centre');
+            }
+            scoreButton?.setDetail(title);
+          } else scoreButton?.setDetail('');
           if (!selected) caption(title, landingFailed ? 'Terrain could not load · Press X to try again' : controls, scores?.overlay.enabled
             ? 'Red 0% · Yellow 50% · Green 100%' : '');
         }

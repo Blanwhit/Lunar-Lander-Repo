@@ -121,12 +121,13 @@ async function main() {
   const overlayTime = (ms: number, immediate = false) => {
     if (!overlay?.enabled) return;
     clearTimeout(overlayTimer);
-    overlayTimer = window.setTimeout(() => void overlay.setTime(ms), immediate ? 0 : 150);
+    if (immediate) void overlay.setTime(ms);
+    else overlayTimer = window.setTimeout(() => void overlay.setTime(ms), 150);
   };
   if (overlay) overlay.onChange = () => (needsRender = true);
   hud.onFeasibility = (on) => {
     if (!overlay) return;
-    overlay.enabled = on;
+    overlay.setEnabled(on);
     tree.feasProvider = on ? (L, f, x, y) => overlay.lookup(L, f, x, y) : null;
     if (on) overlayTime(simMs, true);
     needsRender = true;

@@ -54,6 +54,14 @@ export class FeasibilityOverlay {
     for (let f = 0; f < 6; f++) this.roots.push(this.node(0, f, 0, 0));
   }
 
+  setEnabled(enabled: boolean) {
+    if (enabled && !this.enabled) {
+      // A failed download can be requested again when the user reopens feasibility.
+      for (const node of this.nodes.values()) if (node.state === 3) node.state = 0;
+    }
+    this.enabled = enabled;
+  }
+
   private ensureWorkers() {
     if (this.workers.length) return;
     const n = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));

@@ -13,7 +13,7 @@ export class VrFeasibility {
     this.level = Math.min(1, overlay.meta.maxLevel);
   }
 
-  reading(direction: Vec3) {
+  reading(direction: Vec3, label = 'Feasibility') {
     const { face, a, b } = dirToFace(direction);
     const n = 1 << this.level;
     const u = Math.max(0, Math.min(n, (a + 1) * n / 2));
@@ -30,7 +30,7 @@ export class VrFeasibility {
     const bytes = data as Uint8Array;
     const low = bytes[offset] * (1-dx) + bytes[offset+1] * dx;
     const high = bytes[offset+width] * (1-dx) + bytes[offset+width+1] * dx;
-    return 'Feasibility ' + Math.round((low*(1-dy) + high*dy) * 100 / 255) + '%';
+    return label + ' ' + Math.round((low*(1-dy) + high*dy) * 100 / 255) + '%';
   }
 }
 

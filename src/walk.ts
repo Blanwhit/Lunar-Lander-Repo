@@ -393,7 +393,9 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       mission.view==='Cockpit'?'Drag to look around':desktopControls+' Click terrain to travel there.';
     suit.group.visible=mission.view==='Surface';samples.group.visible=suit.group.visible;
   }
+  let landingX=0, landingZ=0, nextScoreUpdate=0;
   function setObserver(x:number,z:number){
+    landingX=x;landingZ=z;nextScoreUpdate=0;
     targetX=x;targetZ=z+11;desktopYaw=0;desktopPitch=.12;
   }
   setObserver(0,0);syncMissionView();
@@ -864,6 +866,17 @@ export async function startWalk(container: HTMLElement, options: WalkOptions): P
       globeButton.update(pose, pointers);
       if(missionLocal)viewButton.update(pose,pointers);
       if (choosingLanding) return;
+      if(scores && scoreButton){
+        if(!scores.overlay.enabled){
+          scoreButton.setDetail('');
+          nextScoreUpdate=0;
+        } else if(time>=nextScoreUpdate){
+          const walking=!missionLocal || mission.view==='Surface';
+          const location=site.height.coordinates(walking?targetX:landingX,walking?targetZ:landingZ);
+          scoreButton.setDetail(scores.reading(latLonToDir(location.lat,location.lon),walking?'Surface':'Landing site'));
+          nextScoreUpdate=time+200;
+        }
+      }
       const { position, orientation } = pose.transform;
       trackedHeight = position.y + floorOffset;
       headOffset.set(position.x, 0, position.z).applyAxisAngle(worldUp, rig.rotation.y);
