@@ -4,7 +4,7 @@ import type { VrFeasibility } from './vrFeasibility';
 const width = .44, height = .088;
 
 /** A stereo HUD button. The mesh and the controller hit test use the same XR reference space. */
-export class VrFeasibilityButton {
+export class VrHudButton {
   readonly mesh: Mesh<PlaneGeometry, MeshBasicMaterial>;
   private readonly canvas = document.createElement('canvas');
   private readonly texture: CanvasTexture;
@@ -14,7 +14,12 @@ export class VrFeasibilityButton {
   private pressed = false;
   private lastState = '';
 
-  constructor(private scores: VrFeasibility) {
+  static feasibility(scores: VrFeasibility, offsetX = 0) {
+    return new VrHudButton('Feasibility', scores.toggle, offsetX, () => scores.overlay.enabled);
+  }
+
+  constructor(private label: string, private activate: () => void,
+    private offsetX: number, private getEnabled?: () => boolean) {
     this.canvas.width = 600;
     this.canvas.height = 120;
     this.texture = new CanvasTexture(this.canvas);
@@ -22,7 +27,7 @@ export class VrFeasibilityButton {
     this.mesh = new Mesh(new PlaneGeometry(width, height), new MeshBasicMaterial({
       map: this.texture, transparent: true, depthTest: false, depthWrite: false, toneMapped: false,
     }));
-    this.mesh.name = 'Feasibility button';
+    this.mesh.name = label + ' button';
     this.mesh.renderOrder = 10000;
     this.hide();
   }
@@ -42,7 +47,7 @@ export class VrFeasibilityButton {
     const mesh = this.mesh;
     mesh.visible = true;
     mesh.quaternion.copy(viewer.transform.orientation);
-    mesh.position.set(0, -.80 * lowerSlope, -1).applyQuaternion(mesh.quaternion).add(viewer.transform.position);
+    mesh.position.set(this.offsetX, -.80 * lowerSlope, -1).applyQuaternion(mesh.quaternion).add(viewer.transform.position);
     mesh.updateMatrix();
 
     let hovered = false;
@@ -58,11 +63,12 @@ export class VrFeasibilityButton {
       }
     }
     const pressed = !!source?.gamepad?.buttons[4]?.pressed;
-    if (hovered && source === this.previousSource && pressed && !this.pressed) this.scores.toggle();
+    const clicked = hovered && source === this.previousSource && pressed && !this.pressed;
     this.previousSource = source;
     this.pressed = pressed;
 
-    const enabled = this.scores.overlay.enabled;
+    if (clicked) this.activate();
+    const enabled = this.getEnabled?.();
     const state = (enabled ? 'on' : 'off') + (hovered ? '-hover' : '');
     if (state !== this.lastState) {
       this.lastState = state;
@@ -77,9 +83,11 @@ export class VrFeasibilityButton {
       c.textBaseline = 'middle'; c.textAlign = 'center'; c.font = 'bold 36px system-ui';
       c.fillStyle = '#162329'; c.fillText('X', 62, 61);
       c.fillStyle = '#ffffff'; c.textAlign = 'left'; c.font = '600 46px system-ui';
-      c.fillText('Feasibility', 118, 61);
-      c.textAlign = 'right'; c.font = 'bold 38px system-ui';
-      c.fillStyle = enabled ? '#9ee49d' : '#cad4d8'; c.fillText(enabled ? 'ON' : 'OFF', 556, 61);
+      c.fillText(this.label, 118, 61, enabled === undefined ? 450 : 330);
+      if (enabled !== undefined) {
+        c.textAlign = 'right'; c.font = 'bold 38px system-ui';
+        c.fillStyle = enabled ? '#9ee49d' : '#cad4d8'; c.fillText(enabled ? 'ON' : 'OFF', 556, 61);
+      }
       this.texture.needsUpdate = true;
     }
     return hovered;
