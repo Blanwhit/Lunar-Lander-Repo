@@ -1,52 +1,38 @@
 import {
-  AdditiveBlending, BackSide, BufferGeometry, CylinderGeometry, DirectionalLight, Float32BufferAttribute, CanvasTexture, DataTexture, EquirectangularReflectionMapping, Group,
-  MathUtils, Mesh, MeshBasicMaterial, MeshStandardMaterial, Object3D, Points, PointsMaterial,
-  Quaternion, SphereGeometry, ShaderMaterial, DoubleSide, TextureLoader, SRGBColorSpace, Texture, Vector3,
+  BufferGeometry, CanvasTexture, DataTexture, EquirectangularReflectionMapping, Float32BufferAttribute,
+  Group, MathUtils, Mesh, MeshStandardMaterial, Points, PointsMaterial, Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { centreHeight, padRadius, LanderDynamics, LandingBed } from './landerDynamics';
 import { LunarObserver } from './lunarObserver';
-import { createMissionCabin } from './missionCabin';
 
-export const missionViews = ['Outside','Cockpit','Surface'] as const;
+export const missionViews = ['Outside','Surface'] as const;
 export type MissionView = typeof missionViews[number];
 const base = import.meta.env.BASE_URL + 'mission/';
-let models: Promise<Group[]> | undefined;
+let landerAsset: Promise<Group> | undefined;
 export function preloadMission() {
-  return models ??= Promise.all(['saturn-v','csm','lander'].map(async name =>
-    (await new GLTFLoader().loadAsync(base+name+'.glb')).scene)).catch(error => {models=undefined;throw error;});
+  return landerAsset ??= new GLTFLoader().loadAsync(base+'lander.glb').then(asset => asset.scene)
+    .catch(error => { landerAsset=undefined; throw error; });
 }
-const departureEnd=3.6, transferEnd=7.2;
+const departureEnd=3.6, transferEnd=7.2, descentDuration=22;
 
 const contactStep=1/120;
+const solidContacts=[
+  [padRadius,0,0],[-padRadius,0,0],[0,0,padRadius],[0,0,-padRadius],[0,.38,0],
+].map(([x,y,z])=>new Vector3(x,y,z));
+
+interface SensingProbe {
+  weights: number[];
+  foldedIndex: number;
+  extended: Vector3;
+  folded: Vector3;
+}
 
 export class LandingMission {
   readonly group=new Group();
-  readonly intro=new Group();
-  readonly cabin=createMissionCabin();
-  readonly rocket:Object3D;
-  readonly csm:Object3D;
-  readonly lander:Object3D;
-  private stage?:Object3D;
-  private stageRest=new Vector3();
-  private transferLander:Object3D;
-  private moon:Mesh<SphereGeometry,MeshStandardMaterial>;
+  readonly lander:Group;
   private environment:DataTexture;
   private surfaces=new Map<MeshStandardMaterial,MeshStandardMaterial>();
-  private earthPhoto:Texture;
-  private earth:Mesh<SphereGeometry,MeshStandardMaterial>;
-  private atmosphere:Mesh<SphereGeometry,MeshBasicMaterial>;
-  private engines=new Group();
-  private plumeMaterial=new ShaderMaterial({
-    transparent:true,depthWrite:false,side:DoubleSide,blending:AdditiveBlending,uniforms:{clock:{value:0}},
-    vertexShader:`varying vec2 st;void main(){st=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-    fragmentShader:`varying vec2 st;uniform float clock;void main(){
-      float travel=1.-st.y;float swirl=sin(st.x*50.+travel*11.-clock*20.)*.5+.5;
-      float strength=(1.-smoothstep(.22,1.,travel))*(.45+.55*swirl);
-      vec3 tint=mix(vec3(1.,.88,.56),vec3(1.,.23,.045),smoothstep(.05,.65,travel));
-      gl_FragColor=vec4(tint,strength*.73);
-    }`,
-  });
   private dustGeometry=new BufferGeometry();
   private dustMaterial=new PointsMaterial({color:0xb3aaa0,size:.075,transparent:true,opacity:.57,depthWrite:false});
   private dust=new Points(this.dustGeometry,this.dustMaterial);
@@ -54,8 +40,6 @@ export class LandingMission {
   private grainDir=new Float32Array(220*2);
   private dustFade=1;
   readonly focus=new Vector3();
-  readonly eye=new Vector3();
-  readonly viewRotation=new Quaternion();
   private destination=new Vector3();
   private bed!:LandingBed;
   private dynamics!:LanderDynamics;
@@ -63,49 +47,37 @@ export class LandingMission {
   private accumulator=0;
   private off=false;
   private phase='Earth departure';
-  private lastPosition=new Vector3();
+  private worldPoint=new Vector3();
+  private probeTip=new Vector3();
+  private probes:SensingProbe[]=[];
+  private firstProbeContact?:number;
   readonly observer = new LunarObserver();
   height=0;
   speed=0;
   view:MissionView='Outside';
-  constructor(assets:Group[],private sun:Vector3,earthMap:Texture|undefined, private floor:(x:number,z:number)=>number,
+  constructor(asset:Group,private sun:Vector3, private floor:(x:number,z:number)=>number,
     private surface:(x:number,z:number)=>number, private originElevation:()=>number) {
-    [this.rocket,this.csm,this.lander]=assets.map(asset=>asset.clone(true));
+    this.lander=asset.clone(true);
+    this.lander.updateMatrixWorld(true);
     this.environment=this.reflections();
     this.lander.traverse(node=>{
-      if(!(node instanceof Mesh) || !(node.material instanceof MeshStandardMaterial))return;
+      if(!(node instanceof Mesh))return;
+      node.castShadow=node.receiveShadow=true;
+      const index=node.morphTargetDictionary?.Folded;
+      if(index!==undefined && node.morphTargetInfluences && node.userData.extendedTip && node.userData.foldedTip){
+        this.probes.push({
+          weights:node.morphTargetInfluences,foldedIndex:index,
+          extended:new Vector3().fromArray(node.userData.extendedTip).applyMatrix4(node.matrixWorld),
+          folded:new Vector3().fromArray(node.userData.foldedTip).applyMatrix4(node.matrixWorld),
+        });
+      }
+      if(!(node.material instanceof MeshStandardMaterial))return;
       const source=node.material;
       let surface=this.surfaces.get(source);
       if(!surface){surface=source.clone();surface.envMap=this.environment;this.surfaces.set(source,surface);}
       node.material=surface;
     });
-    this.transferLander=this.lander.clone(true);this.transferLander.rotation.z=Math.PI;
-    this.csm.add(this.transferLander);
-    const moonMap=new TextureLoader().load(import.meta.env.BASE_URL+'lunar-soil/global-albedo.jpg');
-    moonMap.colorSpace=SRGBColorSpace;
-    this.moon=new Mesh(new SphereGeometry(1,72,40),new MeshStandardMaterial({map:moonMap,roughness:1}));
-    this.moon.rotation.y=1.5;
-    this.stage=this.rocket.getObjectByName('S_IC');
-    if(this.stage)this.stageRest.copy(this.stage.position);
-    this.lander.traverse(o=>{if(o instanceof Mesh){o.castShadow=true;o.receiveShadow=true;}});
-    this.earth=new Mesh(new SphereGeometry(1,96,64),new MeshStandardMaterial({map:earthMap ?? null,roughness:1}));
-    this.earthPhoto=new TextureLoader().load(base+'earth.webp',tex=>{this.earth.material.map=tex;this.earth.material.needsUpdate=true;});
-    this.earthPhoto.colorSpace=SRGBColorSpace;this.earthPhoto.anisotropy=4;
-    this.earth.rotation.y=1.35;
-    this.atmosphere=new Mesh(new SphereGeometry(1,96,64),new MeshBasicMaterial({color:0x548dc3,side:BackSide,transparent:true,opacity:.27,depthWrite:false}));
-    this.earth.add(this.atmosphere);this.atmosphere.scale.setScalar(1.003);
-    const plume=new CylinderGeometry(1,2.25,1,32,1,true);
-    plume.translate(0,-.5,0);
-    // Exhaust expands away from each F-1 bell.
-    for(const [x,z] of [[0,0],[-3.94,-2.85],[-2.84,3.88],[2.83,-3.88],[3.90,2.83]]){
-      const nozzle=new Mesh(plume,this.plumeMaterial);
-      nozzle.position.set(x,0,z);nozzle.scale.set(1.74,16,1.74);
-      this.engines.add(nozzle);
-    }
-    this.rocket.add(this.engines);
-    const key=new DirectionalLight(0xfff2db,2.4);key.position.set(-3,5,4);
-    this.intro.add(this.earth,this.moon,this.rocket,this.csm,key);
-    this.group.add(this.intro,this.lander,this.cabin.group,this.dust);
+    this.group.add(this.lander,this.dust);
     const grainImage=document.createElement('canvas');grainImage.width=grainImage.height=32;
     const brush=grainImage.getContext('2d')!,falloff=brush.createRadialGradient(16,16,0,16,16,16);
     falloff.addColorStop(0,'rgba(255,255,255,.8)');falloff.addColorStop(.35,'rgba(255,255,255,.32)');
@@ -134,14 +106,19 @@ export class LandingMission {
     this.destination.set(x,this.floor(x,z),z);
     this.bed=new LandingBed(this.surface);this.dynamics=new LanderDynamics(this.bed);
     this.group.visible=true;this.off=false;this.time=0;this.accumulator=0;this.dustFade=1;
-    this.rocket.rotation.set(0,0,-.15);this.rocket.position.set(x,14000,z);
-    if(this.stage)this.stage.position.copy(this.stageRest);
+    this.firstProbeContact=undefined;
+    for(const probe of this.probes)probe.weights[probe.foldedIndex]=0;
     this.lander.quaternion.identity();this.lander.position.copy(this.destination);
     this.observer.reset(x,z,this.originElevation(),this.floor);
     this.advance(0);
   }
   get inSpace(){return this.time<transferEnd;}
-  get flightVisible(){return this.inSpace && this.view==='Cockpit';}
+  enterSurfaceVR() {
+    // Start a fresh headset landing with the final approach already visible.
+    // Entering a mission later preserves its current descent or resting pose.
+    if(this.inSpace)this.time=transferEnd+descentDuration-10;
+    this.advance(0);
+  }
   get status(){return this.phase;}
   get atRest(){return this.dynamics.settled;}
   get landed(){return this.dynamics.contacted;}
@@ -151,64 +128,38 @@ export class LandingMission {
   advance(dt:number){
     this.time+=dt;
     const t=this.time, p=this.destination;
-    this.intro.visible=this.flightVisible;
-    this.rocket.visible=t<departureEnd;this.csm.visible=!this.rocket.visible;
-    this.lander.visible=!this.inSpace && this.view!=='Cockpit';
-    this.cabin.group.visible=this.view==='Cockpit';
+    this.lander.visible=!this.inSpace;
     if(this.inSpace){
-      const transfer=t>=departureEnd;
-      const rocketTime=Math.min(t,departureEnd);
-      this.rocket.position.set(p.x+rocketTime*rocketTime*1.4,14000+rocketTime*17,p.z);
-      this.rocket.rotation.z=-.15-rocketTime*.07;
-      if(this.stage && t>2.5)this.stage.position.y=this.stageRest.y-14*(t-2.5)**2;
-      this.engines.visible=t<2.5;this.plumeMaterial.uniforms.clock.value=t;
-      this.engines.scale.y=.83+.15*Math.sin(t*43);
-      this.csm.position.set(p.x+17+(t-departureEnd)*2.5,14048,p.z);
-      this.csm.rotation.set(.85,.2,t*.08-.9);
-      const arrival=MathUtils.smootherstep(t,5.6,transferEnd);
-      this.transferLander.position.set(0,17.9+arrival*9,0);
-      this.moon.visible=transfer;
-      this.moon.scale.setScalar(18+arrival*260);
-      this.moon.position.set(this.csm.position.x+85,this.csm.position.y-45-arrival*130,this.csm.position.z-440);
-
-      const vehicle=transfer?this.csm:this.rocket;
-      this.focus.set(0,transfer?9:50,0).applyQuaternion(vehicle.quaternion).add(vehicle.position);
-      const progress=MathUtils.smootherstep(t,departureEnd,transferEnd);
-      const radius=transfer?MathUtils.lerp(380,62,progress):1150;
-      this.earth.scale.setScalar(radius);
-      this.earth.position.set(this.focus.x-radius*.42,this.focus.y-radius*.64,this.focus.z-(transfer?620:1080));
-      this.earth.rotation.y=1.35+t*.021;
-      this.phase=arrival>.3?'Lunar arrival':transfer?'Translunar coast':'Earth departure';
+      this.phase=t<departureEnd?'Earth departure':t<6?'Translunar coast':'Lunar arrival';
       this.height=0;this.speed=0;
-      this.cabin.setVehicle('command');
     }else{
-      this.cabin.setVehicle('lunar');
       let freeDt=dt;
       if(!this.off){
         const s=Math.max(0,t-transferEnd);
-        const rem=Math.max(0,1-s/22);
+        const rem=Math.max(0,1-s/descentDuration);
         // Braking removes horizontal velocity before the near-vertical final descent.
-        const h=115*rem**3+.63*(22-s)+.05;
+        const h=115*rem**3+.63*(descentDuration-s)+.05;
         const trail=135*rem**3;
-        const x=p.x+.18*trail+.12*(22-s),z=p.z-trail;
+        const x=p.x+.18*trail+.12*(descentDuration-s),z=p.z+trail;
         const terrain=this.floor(x,z);
         this.lander.position.set(x,Math.max(p.y,terrain)+h,z);
-        this.lander.rotation.set(-.38*rem,0,.015*rem);
+        this.lander.rotation.set(.38*rem,0,.015*rem);
         this.height=this.lander.position.y-this.floor(this.lander.position.x,this.lander.position.z);
-        this.speed=.63+345/22*rem**2;
-        if(this.height<16 && this.probeContact()){
+        this.speed=.63+345/descentDuration*rem**2;
+        if(this.height<16 && this.shouldCutOff()){
           this.off=true;freeDt=0;const body=this.dynamics;
           body.rotation.copy(this.lander.quaternion);
           body.position.set(0,centreHeight,0).applyQuaternion(body.rotation).add(this.lander.position);
-          body.velocity.set(-.12-.18*405/22*rem**2,-this.speed,405/22*rem**2);
+          body.velocity.set(-.12-.18*405/descentDuration*rem**2,-this.speed,-405/descentDuration*rem**2);
         }
       }
-      if(this.off){
+      if(this.off && !this.dynamics.settled){
         const body=this.dynamics;
         this.accumulator+=freeDt;
         while(this.accumulator>=contactStep){body.step(contactStep);this.accumulator-=contactStep;}
         this.lander.quaternion.copy(body.rotation);
         this.lander.position.set(0,-centreHeight,0).applyQuaternion(body.rotation).add(body.position);
+        this.foldProbes();
         this.speed=body.velocity.length();this.height=Math.max(0,this.lander.position.y-this.floor(this.lander.position.x,this.lander.position.z));
       }
       this.phase=this.off?(this.dynamics.tilt>Math.PI/4?'Lander tipped':this.dynamics.settled?'At rest':this.landed?'Touchdown':'Engine cutoff'):
@@ -216,16 +167,34 @@ export class LandingMission {
       this.focus.set(0,3.25,0).applyQuaternion(this.lander.quaternion).add(this.lander.position);
     }
     this.updateDust(dt);
-    this.cabin.update(this.height,this.speed,this.landed);
-    this.frameCamera();
   }
-  private probeContact(){
-    // The forward (ladder) pad has no probe. A ridge under the nozzle can strike first.
-    for(const [x,y,z] of [[padRadius,-.6,0],[-padRadius,-.6,0],[0,-.6,padRadius],[0,0,-padRadius],[0,.38,0]]){
-      const point=this.lastPosition.set(x,y,z).applyQuaternion(this.lander.quaternion).add(this.lander.position);
-      if(point.y<=this.bed.at(point.x,point.z))return true;
+  private clearance(local:Vector3){
+    const p=this.worldPoint.copy(local).applyQuaternion(this.lander.quaternion).add(this.lander.position);
+    return p.y-this.bed.at(p.x,p.z);
+  }
+  private foldProbes(){
+    for(const probe of this.probes){
+      let low=probe.weights[probe.foldedIndex], high=1;
+      if(low>=1)continue;
+      const tip=this.probeTip.lerpVectors(probe.extended,probe.folded,low);
+      if(this.clearance(tip)>0)continue;
+      this.firstProbeContact??=this.time;
+      // Landed probes stay bent. Resolve each tip against the soil under that leg.
+      if(this.clearance(probe.folded)>0){
+        for(let i=0;i<8;i++){
+          const mid=(low+high)/2;
+          if(this.clearance(this.probeTip.lerpVectors(probe.extended,probe.folded,mid))<0)low=mid;
+          else high=mid;
+        }
+      }
+      probe.weights[probe.foldedIndex]=high;
     }
-    return false;
+  }
+  private shouldCutOff(){
+    this.foldProbes();
+    // The Apollo press kit allows one second for the crew to respond to the contact light.
+    if(this.firstProbeContact!==undefined && this.time-this.firstProbeContact>=1)return true;
+    return solidContacts.some(local=>this.clearance(local)<=0);
   }
   private updateDust(dt:number){
     if(this.off)this.dustFade=Math.max(0,this.dustFade-dt*1.8);
@@ -243,31 +212,9 @@ export class LandingMission {
     }
     pos.needsUpdate=true;this.dustMaterial.opacity=.5*intensity;
   }
-  private frameCamera(){
-    if(this.view==='Cockpit'){
-      if(this.inSpace){
-        const launch=this.rocket.visible;
-        const vehicle=launch?this.rocket:this.csm;
-        this.eye.set(0,launch?98:9,-.48).applyQuaternion(vehicle.quaternion).add(vehicle.position);
-        this.viewRotation.copy(vehicle.quaternion);
-      }else{
-        this.eye.set(-.55,5.45,-1.4).applyQuaternion(this.lander.quaternion).add(this.lander.position);
-        this.viewRotation.copy(this.lander.quaternion);
-      }
-      this.cabin.group.position.copy(this.eye);this.cabin.group.quaternion.copy(this.viewRotation);
-      this.rocket.visible=false;this.csm.visible=false;
-    }else if(this.view==='Outside'){
-      this.eye.copy(this.observer.eye);
-      this.viewRotation.copy(this.observer.rotation);
-    }
-  }
   dispose(){
-    // GLTF geometry and textures belong to the shared model cache.
-    this.cabin.dispose();this.earth.geometry.dispose();this.earth.material.dispose();this.earthPhoto.dispose();
-    this.moon.geometry.dispose();this.moon.material.map?.dispose();this.moon.material.dispose();
+    // The shared GLTF owns the geometry and maps. Each mission owns its reflective materials.
     this.environment.dispose();for(const m of this.surfaces.values())m.dispose();
-    this.atmosphere.geometry.dispose();this.atmosphere.material.dispose();
-    (this.engines.children[0] as Mesh).geometry.dispose();this.plumeMaterial.dispose();
     this.dustGeometry.dispose();this.dustMaterial.map?.dispose();this.dustMaterial.dispose();this.group.removeFromParent();
   }
 }

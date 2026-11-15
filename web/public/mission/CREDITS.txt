@@ -17,6 +17,16 @@ NASA/JSC photographs AS11-40-5927 and AS11-44-6581
 https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=40&frame=5927
 https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=44&frame=6581
 
+Apollo 11 Eagle exterior revisions reference NASA/JSC Apollo 11 frames AS11-40-5862, 5863, 5864, 5918 and 5926. Copper insulation, gold strut wrapping and radial footpad textures derive from frames 5864 and 5926. Probe lengths and 37-inch footpad diameters follow the NASA Lunar Module Landing Gear Subsystem report and Apollo News Reference.
+https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=40&frame=5864
+https://eol.jsc.nasa.gov/SearchPhotos/photo.pl?mission=AS11&roll=40&frame=5926
+https://www.nasa.gov/wp-content/uploads/static/history/alsj/LM04_Lunar_Module_ppLV1-17.pdf
+https://ntrs.nasa.gov/citations/19720018253
+
+Eagle landing sequence
+Three surface-sensing probes fold independently against the simulated terrain. The Apollo 11 press kit supplies the nominal one-second crew response used in the simulation. The Apollo Lunar Surface Journal documents the actual contact call and shutdown.
+https://www.nasa.gov/wp-content/uploads/static/history/alsj/a11/a11.landing.html
+
 Saturn V propulsion and launch escape hardware, the CSM docking collar, crew windows, radiators and deployed four-reflector S-band antenna were reconstructed from NASA references. Stage and service-module interiors are simplified for real-time display. The departure sequence compresses first-stage and interstage separation into one event.
 
 Apollo Spacecraft News Reference
