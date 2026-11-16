@@ -1,115 +1,197 @@
-# Moon LOD viewer
+# Lunar Landing Site Navigator
 
-A static website that shows only the Moon, in 3D, against the real star sky. Terrain is streamed
-level-of-detail from raw NASA elevation data, from the whole globe down to **5 m/px at the lunar
-south pole**. The Sun and the Earth sit at their real positions in the sky for any date and time
-from 2000 to 2050 (JPL Horizons), and the Moon is lit by the Sun. The only interface is a slim
-bar along the bottom:
+Pick a point on the Moon and a time in UTC to see how much sunlight reaches the ground, whether Earth clears the local horizon, and how steep the landing site is. The 3D viewer streams NASA elevation data down to 5 m per pixel near the south pole. You can inspect a site from orbit, compare it with a nearby ridge, or land and walk the terrain in VR.
 
-* **Scale bar** (bottom-left): ground distance at the centre of the view in metric units
-  (1/2/5 × 10ⁿ m or km, about 60–120 px wide).
-* **Date and time** (bottom-centre, UTC): ▲/▼ above and below each field (day, month, year,
-  hour, minute). Click to step, hold to repeat (it accelerates). The mouse wheel or the ↑/↓ and
-  PgUp/PgDn keys work on a focused field. The date order follows the browser's locale. Changing
-  the date to the 31st and then the month clamps to the month's length. The range is limited to
-  the ephemeris (2000-01-01 to 2050-12-31). It starts at the current time.
-* **Feasibility Overlay** (right of the date/time box): an ON/OFF switch. When it's on, every
-  point of the Moon is coloured by its landing-site feasibility at the selected date and time,
-  on a smooth red (0 %) → yellow (50 %) → green (100 %) scale (see
-  [Feasibility score](#feasibility-score)).
-* **Compass** (bottom-right, Google-Earth style): the red needle points to lunar north on
-  screen; click it to turn the view back to north-up (position, zoom and tilt are kept).
-* **Drag**: orbit (inertia). **Shift-drag / Ctrl-drag / two-finger twist**: heading and tilt.
-* **Right-click** a spot: the view pans it to the centre and a popup shows its coordinates and
-  colour-coded feasibility score. **More info** (or F3 while a spot is selected) opens a panel
-  with the full site report: Sun, Earth and landing factors with the power, connectivity and
-  landing scores. Escape closes both.
-* **Wheel / pinch**: zoom, from the whole Moon down to just above the surface. The view tilts
-  towards the horizon automatically near the ground.
-* Point analysis (Earth link, power, temperature, slope, Earthrise/-set): see the
-  [Site API](#site-api-websrcapi).
-* Optional deep link: `#lat,lon,distance_m[,heading_deg[,tilt_deg[,UTC time]]]`. For example,
-  Shackleton crater is `#-89.67,129.8,25000,0,55`, and an earthrise over the east limb is
-  `#2,84,40000,270,82,2026-01-10T12:00Z`.
+![The Moon in the orbital viewer, with a landing site selected and its feasibility score displayed](docs/images/lunar-viewer.jpg)
 
-## Surface walking in VR
+[Run locally](#run-locally) · [Explore the Moon](#explore-the-moon) · [Walk in VR](#walk-on-the-surface) · [Feasibility score](#feasibility-score) · [Site API](#site-api) · [Build the data](#build-the-data) · [Rendering and benchmarks](#terrain-and-rendering) · [Data credits](#data-credits)
 
-On the hosted Moon site, select a point on the computer and click **Land**. Open Moon in the Quest browser, choose **Connect to computer**, and enter the three-digit code shown on the computer. Choose **Resume VR** on subsequent visits. Once the Quest connects, click **Cast** on the computer. **Resize** expands the view. On the lunar surface, the expanded cast uses the headset’s rendered eye image and buffers about a second of motion when both browsers support it.
+## Run locally
 
-Drag the globe to see the far side. Physical steps move the viewpoint. On Quest 2 the left stick steers, the right stick turns, the left grip runs with stick input, and A jumps. Hold the right index trigger to sprint forward, or steer the sprint with the left stick. Releasing the trigger preserves airborne momentum and lets foot contact slow the astronaut toward the selected walking pace or a stop. A running jump carries your horizontal velocity through flight. The suit follows your head and controller positions. On desktop, click terrain to travel, drag to look, move with WASD or the arrow keys, hold Shift to run, and press Space to jump.
+The orbital viewer needs the generated terrain in `web/public/tiles/`. Check for `web/public/tiles/meta.json` before starting. A fresh clone includes the walking grids, Earth texture and ephemeris. The orbital tiles and star cubemaps come from the data build. Copy the tile directory from a completed build or [generate it from the NASA data](#build-the-data).
 
-In a Quest session, aim the right controller at terrain and hold **B** to point at a spot. Crouch and hold the **right grip** against a loose rock to lift it. Turn your hand to inspect the scan and release the grip while moving to toss it. The helmet soundscape models ventilation, breathing and transmitted boot impacts. Each boot contact pulses its corresponding controller when haptics are available.
+With the tiles in place, run these commands from the repository root:
 
-The surface view reports east-positive longitude, latitude, elevation above the 1,737.4 km lunar reference sphere, and approximate elevation-grid spacing. It uses measured topography at its geographic location, including lunar curvature. The terrain around a landing can load a roughly 167 m LOLA grid. A bundled 948 m grid covers the whole Moon, with finer local and polar data where available. The surface readout shows regional rock cover from Diviner and the surveyed density of boulders at least 4.5 m across where LROC imagery provides counts. Elsewhere it labels the estimate. Individual rock positions, grains and footprints are simulated. The Sun and the Earth in the walk are at their true positions for the UTC time selected in the bottom bar, seen from the landing spot (JPL Horizons ephemeris, the same as the orbital view), so a night-side or shadowed polar site is dark and lit only by earthshine. Direct sunlight and the Sun's glare (the same pass as in the orbital view) fade with how much of the disc the walk terrain leaves visible from the eye, so standing below a crater rim that hides the Sun puts you in shadow.
-
-To regenerate the walking grids from the full local tile build, run `.venv/bin/python pipeline/export_walk_terrain.py` and `.venv/bin/python pipeline/export_walk_regions.py` from the repository root. The hosted headset test includes orbital tile levels 0–2 and the full walking grids. The local build includes the complete orbital tile pyramid.
-
-Pairing and casting use the same-origin `/api/quest/` routes in `web/worker/quest.mjs`. For a hosted build, run `npm run build:site` in `web/` and serve the generated Worker with its `BUCKET` storage and `ASSETS` static bindings. The existing `make build` target produces the standalone static viewer.
-
-## Build and run
-
-### Just run the viewer
-
-If `web/public/tiles/` is already there (copied from another machine or a release archive; it
-isn't in git, see [Repository layout and size](#repository-layout-and-size)):
-
-```bash
+```sh
 cd web
 npm install
-npm run dev        # http://localhost:5173
+npm run dev
 ```
 
-Without the tiles the page stays black. Everything below builds them from the NASA data.
+Open [localhost:5173](http://localhost:5173). If the globe stays black, check the tile directory. To colour the globe by landing feasibility, the build also needs the score tiles generated by `make feasibility`.
 
-### Build everything from scratch
+## Explore the Moon
 
-#### 1. Prerequisites
+Try comparing the floor and rim of Shackleton crater. At 12:00 UTC on 1 March 2026, the model gives a 21° rim horizon for an observer on the crater floor (89.67°S, 129.8°E). It finds no direct sunlight there over the following year. On the connecting ridge, at 89.475°S, 222.69°E, at least part of the Sun clears the horizon about 83% of the year. Even 1 km along the terrain, that fraction can fall to 14–56%.
 
-| what | version | used for |
+| To | Control |
+|---|---|
+| Orbit or zoom | Drag to orbit. Scroll or pinch to zoom. Near the ground the camera tilts toward the horizon. |
+| Change heading and tilt | Shift-drag, Ctrl-drag or twist with two fingers. Click the compass to return to north-up at the same position, zoom and tilt. The red needle points to lunar north. |
+| Inspect a landing site | Click, tap or right-click a point to centre it and see its coordinates and score. Choose **More info** or press F3 to inspect the factors and graph the scores over time. Escape closes the report and popup. |
+| Compare sites on the map | Turn on **Feasibility Overlay**. Red marks the low end of the scale, yellow the midpoint and green the high end. Changing the date recalculates the visible tiles. |
+| Change the time | Click the arrows above or below a date or time field. Hold to step faster, or focus a field and use the wheel, arrow keys or Page Up/Page Down. |
+| Read distance | The scale bar gives the ground distance at the centre of the view. It uses metres or kilometres in steps of 1, 2 or 5 times a power of ten. |
+
+The clock opens at the current time and follows the browser's date order. The ephemeris covers 1 January 2000 through 31 December 2050. Switching to a shorter month clamps the day to its last valid date.
+
+To share a view, append `#lat,lon,distance_m[,heading_deg[,tilt_deg[,UTC time]]]` to the viewer URL. Try [Shackleton from 25 km](http://localhost:5173/#-89.67,129.8,25000,0,55) or [Earthrise over the east limb](http://localhost:5173/#2,84,40000,270,82,2026-01-10T12:00Z) with the local viewer running.
+
+## Walk on the surface
+
+On the hosted site, select a landing point on the computer and click **Land**. Open the same site in the Quest browser, choose **Connect to computer** and enter the three-digit code from the computer. On later visits choose **Resume VR**. Once paired, click **Cast** on the computer. **Resize** expands the cast. When both browsers support it, the expanded surface view shows the headset's rendered eye image with about one second of buffering.
+
+| Action | Quest 2 | Desktop |
 |---|---|---|
-| Python | 3.11+ (built with 3.12) | the data pipeline (`pipeline/`) |
-| Node.js + npm | 18, 20 or 22+ (Vite 6; built with 22.1) | the viewer (`web/`) |
-| gcc / g++ and `sh` | any recent; on Windows MSYS2 MinGW-w64 + Git Bash | compiling the Basis Universal texture encoder once |
-| GNU make | optional | shortcuts; every target is a one-liner, see [Without make](#without-make-windows) |
-| disk | ~25 GB free at the peak | 11 GB raw data + up to 7 GB cache + 3.2 GB tiles + 3.2 GB `web/dist` |
-| network | | NASA PDS / MIT / SVS servers (raw data), GitHub (encoder sources), JPL Horizons API (ephemeris) |
+| Move and look | Take physical steps, steer with the left stick and turn with the right stick. | Click terrain to travel, or use WASD or the arrow keys. Drag to look around. |
+| Run and jump | Hold the left grip while moving the stick to run. Hold the right index trigger to sprint forward and steer with the left stick. Press A to jump. | Hold Shift to run and press Space to jump. |
+| Point at terrain | Aim the right controller and hold B. | |
+| Inspect a loose rock | Crouch, hold the right grip against the rock and turn your hand. Release while moving to toss it. | |
 
-Run everything from the repository root. On macOS/Linux the venv Python is `.venv/bin/python`
-instead of `.venv/Scripts/python` (the Makefile picks the right one).
+A running jump carries horizontal speed through flight. When you release the sprint trigger, ground contact slows the astronaut to a walk or a stop. The suit tracks your head and hands. The helmet audio includes ventilation, breathing and boot impacts. Each footfall pulses the corresponding controller when haptics are available.
 
-#### 2. Steps
+### What the surface measurements mean
 
-| # | command | what it does | output | time (32 threads) |
-|---|---|---|---|---|
-| 1 | `make venv` | creates `.venv` and installs [requirements.txt](pipeline/requirements.txt) (numpy, scipy, rasterio/GDAL, OpenEXR, opencv, zstandard, ...) | `.venv/` | a few min |
-| 2 | `make web` | `npm install` in `web/` | `web/node_modules/` | ~1 min |
-| 3 | `make download` | downloads every file in [sources.json](pipeline/sources.json): DEMs, colour map, star map, Earth images. Sizes are printed first; files over 5 GB are refused unless `--allow-large`. Resumable: after an interruption just run it again, finished files are skipped | `data/raw/` (11.0 GB) | ~65 min |
-| 4 | `make basisu` | fetches Basis Universal v1_50_0_2 from GitHub and compiles it with g++ | `tools/basisu(.exe)` | a few min |
-| 5 | `make tiles` | overviews → heights → colour → stars → meta → stats → ephem → earth (see below) | `web/public/tiles/` (2.7 GB), `web/public/ephem/`, `web/public/sky/earth.jpg` | ~50 min |
-| 6 | `make feasibility` | static inputs of the feasibility overlay (terrain horizons, slope, annual Sun/Earth statistics); adds the `feasibility` entry to `tiles/meta.json` | `web/public/tiles/f/` (~135 MB) | ~40 min |
-| 7 | `make build` | type-check + `vite build`; copies `web/public` including the tiles | `web/dist/` (~2.7 GB static site) | ~1 min |
-| 8 | `make serve` | serves `web/dist` | http://localhost:4173 | |
-| | `make pack` | optional: losslessly packs `data/raw` (10.9 → 5.1 GB, SHA-256 verified); `make unpack` restores it bit-exact | `data/raw_packed/` | |
+The readout gives latitude, east-positive longitude, elevation above the 1,737.4 km reference sphere and the spacing of the active elevation grid. The walk follows measured topography and lunar curvature. A bundled 948 m grid covers the globe, with finer regional and polar grids. At a landing site the viewer can also load LOLA elevations spaced about 167 m apart.
 
-`make tiles` runs these pipeline steps, each also available on its own:
+Diviner supplies regional rock cover. Where LROC imagery provides counts, the readout also gives the surveyed density of boulders at least 4.5 m across. Elsewhere it labels the estimate. Individual rocks, grains and footprints are simulated. The Sun and Earth use the same JPL Horizons positions as the orbital view, seen from the landing spot at the selected time. As a crater rim hides the solar disc, direct light and glare fade. Earthshine can still light the ground.
 
-| target | step | needs |
+To regenerate the walking grids after a full tile build, run `pipeline/export_walk_terrain.py` and then `pipeline/export_walk_regions.py` with the project's virtual-environment Python. The hosted headset test includes orbital levels 0–2 and the full walking grids. A full local build includes the finer orbital levels too.
+
+For hosted pairing and casting, run `npm run build:site` in `web/` and serve the generated Worker with its `BUCKET` storage and `ASSETS` static bindings. Both browsers use the same-origin `/api/quest/` routes. The standalone static viewer uses `make build`. [Quest routes](web/worker/quest.mjs)
+
+## Feasibility score
+
+The score combines power generation (25%), Earth connectivity (25%) and landing conditions (50%) at the selected time. The defaults are example vehicle limits. Set the weights, curves and thresholds in `DEFAULT_FEASIBILITY` to match a particular lander. [Scoring implementation](web/src/api/feasibility.ts)
+
+On the map, the night side scores poorly for solar power. A yellow band on the sunlit side of the terminator can mark places with little daylight left. Near the south pole, sunlit ridges can score well beside dark crater floors. A slope greater than 15° rules out a site under the default landing limits, even in sunlight.
+
+### How the calculation works
+
+1. A piecewise-linear utility curve converts each input to a score between 0 and 100. For example, a slope of 5° earns 100 and a slope of 10° earns 50.
+2. A weighted power mean combines the inputs within each category, then combines the categories. For exponent $p$ and normalised weights $w_i$, the mean is $M_p=(\sum_i w_i s_i^p)^{1/p}$. The default, $p=0$, uses the geometric mean. Scores enter the mean with a floor of 1. A weak factor can therefore pull down a category even if its weight is small.
+3. A category below its threshold $\tau_i$ multiplies the result by $(s_i/\tau_i)^k$. Above or at the threshold its multiplier is 1. Multiply the combined mean by all three multipliers, then clamp the result to 1–100. A knockout sets the multiplier to zero, so the reported score is 1 and the API identifies the failed factor.
+
+For category scores of 27, 56 and 70 with weights of 0.25, 0.25 and 0.50, the combined mean rounds to 56 for $p=1$, 52 for the geometric mean and 44 for $p=-2$. Taking the minimum gives 27. Temperature and prominence have nonzero utility floors to limit their influence at extreme values.
+
+### Default inputs and thresholds
+
+| Category (weight) | Factor (weight) | Utility curve (input → score) |
 |---|---|---|
-| `overviews` | cached 2×2-mean pyramids of every source DEM | the DEMs in `data/raw` |
-| `heights` | cube-sphere height tiles L0–L11 (`MAX_LEVEL`, default 11) with `WORKERS` processes (default 24) | `overviews` |
-| `colour` | KTX2 colour tiles L0–L5 | `data/raw/lroc_color.exr`, `tools/basisu` |
-| `stars` | star cubemaps (512², 2048² and 4096²) from the 16K celestial star map | `starmap_2020_16k.exr`, `tools/basisu` |
-| `meta` | writes `tiles/meta.json` (levels, star files) | the steps above |
-| `stats` | prints the table in [Tile pyramid](#tile-pyramid-output-of-make-stats) | `heights`, `colour` |
-| `ephem` | Sun/Earth state vectors 2000–2050 from the JPL Horizons API, validated against Horizons' sub-solar and sub-Earth points | network |
-| `earth` | Earth texture with baked-in clouds | the Earth images (downloads them if missing) |
+| **Power** (0.25), gate τ = 10, k = 1 | Sun visible now (0.35) | visible fraction of the solar disc 0 → 0, 1 → 100 |
+| | sunlight remaining (0.35) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
+| | annual illumination (0.30) | mean visible-disc fraction over 2026: 0 → 0, 0.3 → 40, 0.6 → 80, 0.9 → 100 |
+| **Earth connectivity** (0.25), gate τ = 10, k = 1 | Earth visible now (0.30) | 0 → 0, 1 → 100 |
+| | link margin above the terrain (0.20) | 0° → 0, 2° → 60, 10° → 100 |
+| | Earth contact remaining (0.25) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
+| | annual Earth visibility (0.25) | fraction of 2026: 0 → 0, 0.5 → 70, 1 → 100 |
+| **Landing** (0.50), gate τ = 40, k = 2 | slope (0.60) | 0–5° → 100, 10° → 50, 15° → 0, **> 15° knockout** |
+| | surface temperature (0.30) | 40 K → 10, 100 K → 70, 130–360 K → 100, 420 K → 30 |
+| | elevation, as local prominence (0.10) | height above the mean of a 3 km ring: −500 m → 40, 0 → 80, +300 m → 100 |
 
-`ephem` and `earth` refresh files that are already committed, so a build that only needs the
-tiles can leave them out by running the other targets directly.
+At the poles, a few metres of mast height can change how much of the Sun or Earth clears a ridge. The default score uses a 10 m solar panel and a 10 m antenna (`panelHeightM`, `antennaHeightM`). A 0.4° horizon tolerance allows for uncertainty when a body grazes the terrain. It affects the current visibility, time remaining, link margin and annual statistics for power and communications. The API also reports the geometry at the requested observer height (2 m by default), without the scoring tolerance. Its temperature model uses that query height for the local horizon.
 
-#### Without make (Windows)
+### Why a map pixel can differ from a site report
 
-The same steps as plain commands (Git Bash, from the repository root):
+Both use the same scoring curves. The overlay trades spatial detail for coverage, so selecting a point can give a different score on a steep crater wall.
+
+| Input | Global overlay | Selected point |
+|---|---|---|
+| Horizon | 64 azimuths from a fixed 10 m mast | 360 azimuths at the configured panel, antenna and observer heights |
+| Elevation data | Up to L6 globally (167 m) and L9 near the poles (about 20 m) | Finest tile available, down to 5 m |
+| Temperature | Instantaneous radiative equilibrium in sunlight. In shadow the estimate cools exponentially from 0.6 to 0.4 times the deep temperature derived from annual mean absorbed flux. | 1-D regolith heat conduction over the preceding three lunations |
+
+`make feasibility` builds a separate quadtree of 64 × 64 grids in `tiles/f/` (format `MLF1`). Each sample stores height, slope, prominence, its terrain horizon and annual Sun, Earth and absorbed-flux statistics for 2026. Levels 0–3 cover the globe at about 5.3 km spacing at L3. Levels 4–6 refine the caps poleward of 84° to about 670 m. Keep the pipeline's `MAST_H` and `HORIZON_TOL` in sync with the scoring configuration. [Grid builder](pipeline/feasibility_grid.py)
+
+When the date changes, browser workers calculate the current Sun and Earth geometry, temperature, and hours of sunlight and Earth contact remaining. They scan in three-hour steps and skip intervals where a body's angular motion and parallax cannot carry its disc across the horizon bounds. Workers score on-screen tiles first. Each result becomes a texture for the terrain shader, which keeps the previous colours until the replacement arrives.
+
+The reference build produced 830 tiles (510 global, 320 polar), with 3.40 million samples in 146 MB. On a 32-thread laptop, 24 workers built the grids in 38 minutes after a five-minute build of the 4.1 GB decoded-height cache. Marching rays in blocks of 16,384 (`FEAS_CHUNK`) reduced contention for memory bandwidth. All 830 tiles matched the earlier 2.6-hour build byte for byte.
+
+In the browser benchmark, one worker scored a tile in about 19 ms, down from 56 ms. Three workers coloured the whole-Moon view in 0.8 s including tile loads. At the sampled equatorial and mid-latitude sites, overlay and API scores agreed within 0.2 points. Polar differences were usually 0–4 points and reached about 20 where the 5 m and 20 m grids resolved different slopes.
+
+## Site API
+
+Pass a latitude, an east-positive longitude and a UTC time to `createSiteApi().query()`. The TypeScript API uses the viewer's elevation tiles, lunar orientation and ephemeris without requiring WebGL. In the browser console, get the viewer's instance with `await __moon.siteApi()`. Browser use has been tested. Node 18+ would need `fetch` and an absolute URL pointing to the hosted data. [API entry point](web/src/api/siteApi.ts)
+
+```ts
+import { createSiteApi } from './api/siteApi';
+
+const api = createSiteApi({ baseUrl: '/' }); // Contains tiles/ and ephem/
+const site = await api.query({
+  lat: -89.475,
+  lon: 222.69,
+  time: '2026-03-01T12:00Z',
+});
+console.log(site.feasibility.score);
+```
+
+Optional query settings include `observerHeightM` (default 2), `linkMaskDeg` (0) and `searchDays` (30).
+
+| Result | What it contains |
+|---|---|
+| `elevation` | Height above the reference sphere (`heightM`), distance from the Moon's centre (`radiusM`) and grid spacing (`dataResolutionM`). |
+| `slope` | Slope in degrees (`slopeDeg`), downslope aspect clockwise from north (`aspectDeg`) and baseline in metres (`baselineM`). The API takes central differences across two grid cells. |
+| `earth`, `sun` | Azimuth, elevation, terrain horizon in that direction, margin, angular radius, visible disc fraction and distance. |
+| `earthConnectivity` | Line of sight, margin and whether all, part or none of the disc clears the horizon plus `linkMaskDeg` (`clear`, `partial`, `blocked`). |
+| `earthEvents` | UTC time and minutes until the next Earthrise and Earthset, measured when Earth's centre crosses the masked horizon. Libration drives these crossings. An event outside the search window returns `null`. |
+| `power` | Sunlight regime, solar constant at the Moon's distance, irradiance on a tracking panel, horizontal panel and local slope, and the next sunrise and sunset. Annual statistics track the mean visible disc fraction and how often any part or the centre is visible over the next 365 days. |
+| `temperature` | Surface and subsurface (about 0.5 m) temperatures, hours since sunlight, uncertainty, method and regime (`sunlit`, `shadow`, `night` or `permanent-shadow`). |
+| `feasibility` | Final score, category and factor scores, raw inputs, gate and knockout factors. |
+| `meta` | Horizon step and reach, tiles loaded, compute time and data sources. |
+
+### Terrain horizon and temperature
+
+The API traces a ray every degree around the observer. Each ray samples fine tiles nearby and coarser tiles farther away for about 0.15° angular resolution. It stops when even the highest lunar terrain (+10.8 km) could no longer rise above the horizon found so far. Typical rays reach 40–280 km. The fraction of each disc above the resulting horizon determines how much Sun or Earth the observer can see.
+
+The thermal model uses Diviner-calibrated density and conductivity profiles from Hayne et al. (2017), temperature-dependent heat capacity, radiative conductivity and incidence-dependent albedo. It computes how sunlight reaches the local slope over the preceding three lunations in 30-minute steps. Pass a different `temperatureModel` to `createSiteApi` to substitute another model or a Diviner data source. [Thermal model](web/src/api/thermal.ts)
+
+### Reference sites and limits
+
+These site checks use 1 March 2026 at 12:00 UTC.
+
+| Site | Model result | Comparison |
+|---|---|---|
+| Apollo 11 (0.67°N, 23.47°E) | Earth at 70°, never sets; sunlit; 386 K surface, 247 K at 0.5 m | Diviner equatorial noon ~390 K, ~250 K at depth |
+| far side (0°, 180°E) | Earth never visible; 104 K five days after sunset | Diviner ~100 K |
+| east limb (0°, 90°E) | Earth sets 8 Mar, rises 25 Mar (libration) | expected monthly cycle |
+| Shackleton floor (89.67°S, 129.8°E) | rim horizon 21°; never sunlit in the next year; Earth blocked | permanently shadowed region |
+| Shackleton connecting ridge (89.475°S, 222.69°E) | 83% of the year with some Sun; points 1 km away 14–56% | published ~80–90% for the ridge |
+| 33°N, 16°W (Mare Imbrium) | inside a ~9 km fresh crater: 21° rim horizon, 1.3 km below the mare | crater confirmed in the independent LROC colour map |
+
+The elevation grid resolves terrain at 167–333 m away from the poles. It cannot distinguish individual boulders there. The Earth-link result describes line of sight only. An RF link budget or a diffraction calculation would require a separate model.
+
+The thermal model omits scattered light and infrared radiation from nearby terrain. Temperatures in permanently shadowed regions are therefore lower bounds. For example, the model gives 19 K on Shackleton's floor, compared with measured values of about 25–70 K.
+
+A first query typically loads 60–300 height tiles of roughly 40 KB each and takes 0.1–0.4 s. Workers can request tiles before the local elevation arrives because the ray path determines which tiles they need. One horizon scan serves all observer heights. If a tile is missing, the ray resumes when the tile arrives. At the same site, a query for another date takes about 25–50 ms. The API reuses the horizon and reference-year statistics, leaving the thermal model as the main cost. [Tile worker pool](web/src/api/tilePool.ts)
+
+## Build the data
+
+Run the pipeline from the repository root. Allow about 25 GB of free disk space at peak for the raw rasters, caches, generated tiles and the copy in the built website. The reference build used Python 3.12, Node 22.1 and a 32-thread laptop. It requires Python 3.11+, Node 18, 20 or 22+ with npm, and a C++ compiler and shell for Basis Universal. On Windows, use Git Bash and MSYS2 MinGW-w64. Downloads come from NASA PDS, MIT, NASA SVS, JPL Horizons and the Basis Universal repository.
+
+On macOS and Linux, set the virtual-environment interpreter explicitly. The Makefile defaults to the Windows path. These commands also work when Python 3 is installed as `python3` rather than `python`:
+
+```sh
+python3 -m venv .venv
+export PY=.venv/bin/python
+"$PY" -m pip install -r pipeline/requirements.txt
+```
+
+On Windows with GNU Make, use `make venv` for this step. Then run the following targets in order:
+
+| Command | Result | Reference time |
+|---|---|---|
+| `make web` | Install the viewer's npm dependencies. | ~1 min |
+| `make download` | Download the rasters and images listed in the [source manifest](pipeline/sources.json) to `data/raw/` (11.0 GB). The downloader prints sizes, skips finished files on restart and requires `--allow-large` for files over 5 GB. | ~65 min |
+| `make basisu` | Fetch Basis Universal tag `v1_50_0_2` and compile the texture encoder into `tools/`. | A few minutes |
+| `make tiles` | Build the height, colour and sky tiles, write the manifest and stats, and refresh the ephemeris and Earth texture. | ~50 min |
+| `make feasibility` | Generate horizons, slopes and annual lighting and visibility statistics. Add the overlay entry to `tiles/meta.json`. | ~40 min |
+| `make build` | Type-check the viewer and build the static site in `web/dist/`, including a copy of the tiles. | ~1 min |
+| `make serve` | Preview the built site at [localhost:4173](http://localhost:4173). | |
+
+<details>
+<summary>Windows build commands without GNU Make</summary>
+
+Run each command in Git Bash at the repository root with MinGW g++ on your PATH.
 
 ```bash
 python -m venv .venv
@@ -129,10 +211,29 @@ sh pipeline/build_basisu.sh                      # needs MinGW g++ on PATH
 (cd web && npm run build && npm run preview)     # http://localhost:4173
 ```
 
-#### Check the result
+</details>
 
-`web/public/tiles/meta.json` should end up like this (the `feasibility` block appears only after
-step 6):
+### Rebuild one part
+
+| Target | Output or action | Inputs |
+|---|---|---|
+| `overviews` | cached 2×2-mean pyramids of every source DEM | the DEMs in `data/raw` |
+| `heights` | cube-sphere height tiles L0–L11 (`MAX_LEVEL`, default 11) with `WORKERS` processes (default 24) | `overviews` |
+| `colour` | KTX2 colour tiles L0–L5 | `data/raw/lroc_color.exr`, `tools/basisu` |
+| `stars` | star cubemaps (512², 2048² and 4096²) from the 16K celestial star map | `starmap_2020_16k.exr`, `tools/basisu` |
+| `meta` | writes `tiles/meta.json` (levels, star files) | the steps above |
+| `stats` | prints the table in [Tile pyramid](#tile-pyramid) | `heights`, `colour` |
+| `ephem` | Sun/Earth state vectors 2000–2050 from the JPL Horizons API, validated against Horizons' sub-solar and sub-Earth points | network |
+| `earth` | Earth texture with baked-in clouds | the Earth images (downloads them if missing) |
+
+These are Make targets, so `make stars meta` rebuilds the sky and its manifest after a change to [the pipeline configuration](pipeline/config.json). The ephemeris and Earth image are already tracked. Run the other targets directly if you only need the tiles.
+
+Build feasibility after the height tiles and the 2026 ephemeris. If `tiles/f/` exists, `make meta` and `make tiles` preserve its entry. Recompute the overlay when its elevation inputs, build level or scoring-grid settings change. If you remove `tiles/f/`, run `make meta` to drop the entry.
+
+For a smaller build, `make heights MAX_LEVEL=9` stops at about 20 m near the south pole. `WORKERS=8` reduces parallelism from 24 processes. A packed source archive needs `make unpack` before any tile rebuild. To start fresh, `make clean-tiles` removes the generated tile directory. The overview and colour targets recreate their intermediates in `data/cache/`.
+
+<details>
+<summary>Expected tile manifest for a full build</summary>
 
 ```json
 {
@@ -148,361 +249,71 @@ step 6):
 }
 ```
 
-With the default settings `make stats` reports the numbers in
-[Tile pyramid](#tile-pyramid-output-of-make-stats). The viewer's Feasibility Overlay switch only
-does something when the `feasibility` block is present.
+The `feasibility` entry appears after the overlay build. Compare `make stats` with the [reference tile counts](#tile-pyramid).
 
-#### Order and re-runs
+</details>
 
-* **Feasibility comes last.** It reads the finished height tiles and the 2026 ephemeris, then adds
-  its entry to `meta.json`. Re-running `make meta` (or `make tiles`) later keeps that entry as long
-  as `tiles/f/` exists, so the ~40 min step never has to be repeated just to restore it. Rerun
-  `make feasibility` only when its inputs change: new height tiles (another `MAX_LEVEL`, other
-  DEM sources or settings) or different feasibility options. Deleting `tiles/f/` and running
-  `make meta` removes the entry.
-* **Packed raw data.** If `data/raw` has been packed (`make pack`), run `make unpack` before
-  rebuilding any tiles. The pipeline reads the original files.
-* **Smaller or faster builds.** `make heights MAX_LEVEL=9` stops the quadtree earlier (about 20 m
-  instead of 5 m at the south pole; each level beyond L6 is built only where a source DEM is fine
-  enough). `WORKERS=8` uses fewer processes on smaller machines, at the cost of time.
-* **Rebuilding one part.** Each target runs on its own once its inputs exist, e.g. `make stars meta`
-  after changing the star settings in [config.json](pipeline/config.json).
-* **Starting over.** `make clean-tiles` deletes `web/public/tiles/`. `data/cache/` can be deleted
-  as well; `overviews` and `colour` rebuild it.
+### Files and disk space
 
-## Site API (`web/src/api/`)
+| Path | Contents | Reference size |
+|---|---|---:|
+| `pipeline/`, `web/src/`, `web/worker/` | Python data pipeline, TypeScript viewer and Quest pairing/casting routes | |
+| `web/public/` (tracked assets) | Walking grids, surface assets, Earth image, Basis transcoder and 51 years of ephemeris | 3.6 MB for the ephemeris |
+| `web/public/tiles/` | Generated orbital and feasibility tiles. Copy this directory to another installation to skip the data build. | 2.77 GB in the reference build |
+| `data/raw/` and `data/raw_packed/` | Original NASA files or their losslessly packed equivalents | 10.93 GB raw, 5.12 GB packed |
+| `data/cache/` | Regenerable intermediates | About 7 GB |
+| `web/dist/` | Built site, including the contents of `web/public/` | About 2.7 GB with the reference tiles |
+| `.venv/`, `web/node_modules/`, `tools/` | Python environment, viewer dependencies and compiled encoder | About 0.57 GB in the reference build |
 
-A headless TypeScript API. Give it a point and a UTC date/time, and it reports Earth
-connectivity, power availability, temperature, elevation, slope and the time until the next
-Earthrise or Earthset. **The surrounding terrain is taken into account** for every
-line-of-sight quantity. It reads the same data as the viewer: the height-tile pyramid, the JPL
-Horizons ephemeris and the IAU orientation. It needs no WebGL and has been tested in the
-browser. It should also run in Node 18+ (it only needs `fetch`
-pointed at a server hosting the site), but that hasn't been tested.
+The large generated directories are excluded from Git. For distributing a tile build, an archive preserves the directory layout. The raw inputs can be downloaded again from the source manifest.
 
-```ts
-import { createSiteApi } from './api/siteApi';
-const api = createSiteApi({ baseUrl: '/' }); // folder that contains tiles/ and ephem/
-const r = await api.query({ lat: -89.475, lon: 222.69, time: '2026-03-01T12:00Z' });
-// options: observerHeightM (default 2), linkMaskDeg (default 0), searchDays (default 30)
-```
+`make pack` applies a delta filter to integer elevation data or an XOR filter to floating-point elevations, then a byte shuffle and Zstandard compression. It decompresses every packed file and verifies its SHA-256 before removing the original. `make unpack` restores the original bytes. [Raw data packer](pipeline/pack_raw.py)
 
-From the viewer's console: `const api = await __moon.siteApi()`.
+## Terrain and rendering
 
-**How terrain is handled.** Each query first builds a 360° **terrain horizon profile**.
-For every azimuth (1° steps) it ray-marches the tile pyramid outward from the observer, using
-finer tiles nearby and coarser ones far away for about 0.15° angular resolution. A ray stops
-once even the highest lunar terrain (+10.8 km) could no longer rise above the horizon found so
-far, typically 40–280 km out. The Sun and Earth count as visible by the fraction of their
-discs above that horizon, so a crater floor whose rim hides the Sun gets no power, and a site
-behind a ridge loses its Earth link.
+### Building the tile pyramid
 
-| field | meaning |
-|---|---|
-| `elevation.heightM`, `radiusM`, `dataResolutionM` | terrain height (vs the 1737.4 km sphere), radius, and grid spacing of the data used (5 m near the south pole, 167–333 m elsewhere) |
-| `slope.slopeDeg`, `aspectDeg`, `baselineM` | local slope and downslope direction (clockwise from north), from central differences over 2 grid cells |
-| `earth.*`, `sun.*` | azimuth, elevation, terrain-horizon elevation in that azimuth, margin, angular radius, visible disc fraction, distance |
-| `earthConnectivity` | `clear` / `partial` / `blocked` (whole disc / part / none above the horizon plus `linkMaskDeg`), `lineOfSight`, margin |
-| `earthEvents` | next Earthrise / Earthset (UTC) and minutes until each, within `searchDays` (the Earth's centre crossing the terrain horizon plus mask; libration drives these); `null` if none |
-| `power` | `sunlit` / `partial` / `shadow`; solar constant at the Moon's distance; irradiance for a sun-tracking panel, a horizontal panel and the local ground slope; next sunrise / sunset; illumination statistics for the next 365 days (mean disc fraction, any part, centre) |
-| `temperature` | surface and ~0.5 m subsurface temperature, regime (`sunlit` / `shadow` / `night` / `permanent-shadow`), hours since sunlight, uncertainty, method |
-| `meta` | horizon step and reach, tiles loaded, compute time, data sources |
+The downloader uses HTTP range requests and multiple connections to the PDS and MIT mirrors. The pipeline reads each PDS3 label for scale, offset, unit and projection, memory-maps the raw raster, and caches a pyramid of 2 × 2 means. For the polar LOLA grids, it replaces a sample with its 3 × 3 median only if the difference exceeds the greater of 15 m and 1.5 times the grid spacing. This affects about 0.0001% of samples. Set `despike_m` to 0 for the original values. [Downloader](pipeline/download.py) · [Source reader](pipeline/moonlod/sources.py)
 
-**Temperature model.** The default ([thermal.ts](web/src/api/thermal.ts)) is a 1-D regolith
-heat-conduction model using Hayne et al. (2017) Diviner-calibrated properties: density and
-conductivity profiles, temperature-dependent heat capacity, radiative conductivity, and
-incidence-dependent albedo. It's driven by the terrain-shadowed, slope-aware absorbed sunlight
-at the point over the preceding three lunations (30-minute steps). Pass
-`temperatureModel` to `createSiteApi` to swap it, for example for LRO Diviner data.
+Each face of the cube-sphere has an equi-angular quadtree. A height tile contains 257 × 257 vertices plus a one-sample border (259 × 259) for normals. The pipeline blends progressively finer sources over narrow latitude bands at the SLDEM/LOLA boundary and the 45°, 60°, 75°, 80° and 87.5° polar cap edges. Trilinear sampling uses the footprint of each sample on the source pyramid. Adjacent tiles get identical heights along shared edges, including across cube faces. A tile at level L exists only where a source has spacing at most 1.5 times the cell size at that level. All four siblings are generated together. [Height tile builder](pipeline/moonlod/heights.py)
 
-**Validation** (2026-03-01 12:00 UTC):
+The `MLH2` format quantises heights to 16 bits using a base and step per tile. The step is about 1/256 of a cell, ranging from 32 m at L0 to 3 cm at L11. Compression then preserves those quantised values exactly:
 
-| site | result | reference |
-|---|---|---|
-| Apollo 11 (0.67°N, 23.47°E) | Earth at 70°, never sets; sunlit; 386 K surface, 247 K at 0.5 m | Diviner equatorial noon ~390 K, ~250 K at depth |
-| far side (0°, 180°E) | Earth never visible; 104 K five days after sunset | Diviner ~100 K |
-| east limb (0°, 90°E) | Earth sets 8 Mar, rises 25 Mar (libration) | expected monthly cycle |
-| Shackleton floor (89.67°S, 129.8°E) | rim horizon 21°; never sunlit in the next year; Earth blocked | permanently shadowed region |
-| Shackleton connecting ridge (89.475°S, 222.69°E) | 83% of the year with some Sun; points 1 km away 14–56% | published ~80–90% for the ridge |
-| 33°N, 16°W (Mare Imbrium) | inside a ~9 km fresh crater: 21° rim horizon, 1.3 km below the mare | crater confirmed in the independent LROC colour map |
+1. Divide out any common spacing between values inherited from a coarser grid.
+2. Predict each value using either a plane (left + up − upper left) or an 11-neighbour least-squares fit. Keep the predictor that produces the smaller tile.
+3. Encode the residuals with static rANS and a separate frequency table for each local-activity range.
 
-**Limitations.**
-- **Terrain resolution:** follows the tile pyramid. Away from the poles the data is 167–333 m
-  (SLDEM2015 128 ppd), so small rocks and boulders aren't resolved.
-- **Lighting:** temperatures leave out light scattered by, and infrared emitted from,
-  surrounding terrain. Values in permanently shadowed regions (19 K on Shackleton's floor) are
-  therefore lower bounds; measured values are ~25–70 K.
-- **Earth link:** this is line-of-sight geometry only. There is no RF link budget and no
-  diffraction model.
-- **Range and speed:** times are limited to the ephemeris range (2000–2050). The first query at
-  a site takes ~0.1–0.4 s, nearly all of it loading the 60–300 height tiles (~40 KB each) of its
-  horizon. In the browser they are fetched and decoded by a pool of workers
-  ([tilePool.ts](web/src/api/tilePool.ts)), and most are requested before the site's own tiles
-  have arrived: which tiles a horizon ray reads depends on the distance, not on the terrain. One
-  scan then serves every observer height (the query's and the score's masts), and a pass that
-  finds a tile missing resumes each ray where it stopped once the tile is there. Further queries
-  at the same site (another date or time) take ~25–50 ms: the horizon and the reference-year
-  statistics are cached per site, and most of what is left is the regolith temperature model.
+The browser decodes a tile in about 3–4 ms in a worker. `make transcode-heights` converts an existing `MLH1` pyramid in place. The newer encoding reduced the height pyramid from 2.59 to 2.04 GB (21%) and the walking grids from 40.5 to 31.2 MB (23%). Zstandard level 19 on the same residuals saved 11% against the earlier encoding. The KTX2 colour data gained only another 1.3% at maximum compression. [Encoder](pipeline/moonlod/gridcodec.py) · [Browser decoder](web/src/terrain/gridCodec.ts)
 
-## Feasibility score
+Colour tiles have 256 × 256 corner-aligned texels and mipmaps. Levels 0–1 use ETC1S to keep the first load small. Levels 2–5 use UASTC with Zstandard to limit colour blocking under magnification. The ~400 m source supports L5 (333 m/px). Finer terrain tiles reuse the L5 texture with a UV transform.
 
-A 0–100 % landing-site score with three categories: **power generation**, **Earth
-connectivity** and **landing**. It's built from every quantity the Site API reports and
-combined in three tiers ([feasibility.ts](web/src/api/feasibility.ts)). The overlay and the
-API share this module, so they combine their inputs identically.
+### Drawing terrain at different scales
 
-1. **Utility curves.** Each raw sub-factor is mapped to 0–100 by a piecewise-linear curve.
-   A curve can declare a *knockout*, a value at which the site is impossible.
-2. **Category scores.** Sub-factors combine into category scores, and categories into an
-   overall score, with a weighted power mean M_p = (Σ wᵢ sᵢᵖ)^(1/p). The default is the
-   geometric mean (p = 0): the score leans toward the weakest factor without that factor
-   erasing everything else. Scores are floored at 1 so that the mean stays finite.
-3. **Gates.** Critical categories have a gate: gᵢ = 1 if sᵢ ≥ τᵢ, else (sᵢ/τᵢ)^k. The final
-   score is clamp(G·M, 1, 100), where G = Πgᵢ, and G = 0 on any knockout. Power and Comms
-   gates are soft (τ = 10, k = 1): they only bite when a category is nearly absent, so a weak
-   category is penalised once (by the mean), not three times (mean + p < 0 + hard gate).
+The renderer splits a tile when the camera distance falls below $D_L=\max(Pt_L/q,\,2.5d_L)$, where $P$ is the pixel projection scale, $t_L$ is the level's texel size, $q$ is the screen-space threshold and $d_L$ is the tile diagonal. The default target is about 1.25 screen pixels per height texel. Neighbours differ by at most one level. Bounding spheres reject tiles outside the view, and probe points against a minimum-radius lunar sphere reject tiles beyond the horizon. A parent stays visible until all four children are ready. [Tile selection and streaming](web/src/terrain/TileTree.ts)
 
-**Grazing geometry.** Near the poles the Sun and the Earth skim the horizon, so two choices
-make the score usable there:
-- **Mast height.** Power is scored for a panel 10 m above the ground and Comms for an antenna
-  10 m up (`panelHeightM`, `antennaHeightM`; the brief allowed 2–10 m for the panel). Published
-  polar illumination studies show ridges gaining several percentage points of sunlight going
-  from 2 m to 10 m. The landing temperature still uses the ground (the query's
-  `observerHeightM`, default 2 m).
-- **Horizon tolerance δ = 0.4°** (`horizonToleranceDeg`). A body counts as visible while its
-  margin above the terrain horizon is > −δ. This covers DEM error at the 20 m polar grid and
-  diffraction at grazing angles. It applies to the Sun and the Earth in every Power/Comms input
-  (visible now, hours remaining, link margin, annual statistics), on top of the API's
-  `linkMaskDeg`. The reported geometry (`earth`, `sun`, `earthConnectivity`, rise/set events)
-  stays physical: observer height, no tolerance.
+To smooth the transition, odd vertices move onto the parent grid as their camera distance crosses the interval from $0.8D_{L-1}$ to $D_{L-1}$ (CDLOD geomorphing). Skirts cover residual cracks. All tiles share a 65 × 65 mesh by default. The vertex shader displaces it with a 259 × 259 R16UI height texture. Workers bake mipmapped RG16F tangent-space normals at full height resolution.
 
-The overlay bakes both into its tiles (`MAST_H`, `HORIZON_TOL` in
-[feasibility_grid.py](pipeline/feasibility_grid.py)); keep them equal to the config.
+At 5 m/px, absolute lunar coordinates would lose precision on the GPU. The CPU computes the tile origin relative to the camera in 64-bit arithmetic. The shader adds the local offset $R(d-d_c)+hd$ using cancellation-free identities. The near and far clipping planes follow the camera height above the terrain.
 
-Defaults. **All of these are placeholders; replace them with your lander's tolerances** in
-`DEFAULT_FEASIBILITY`:
+A worker pool fetches and decodes height tiles in screen-error order. Three.js KTX2Loader workers transcode colour textures. A least-recently-used cache evicts textures above the 384 MB GPU budget. The normal-map bake takes about 2 ms per tile using reusable buffers, the cube-direction length $\sqrt{1+s^2+t^2}$ and native `Float16Array` conversion where available. In one local-server test, 104 tiles at a new mare site refined in 0.35 s, down from 1.04 s.
 
-| category (weight) | sub-factor (weight) | utility curve (value → score) |
-|---|---|---|
-| **Power** (0.25), gate τ = 10, k = 1 | Sun visible now (0.35) | visible fraction of the solar disc 0 → 0, 1 → 100 |
-| | sunlight remaining (0.35) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
-| | annual illumination (0.30) | mean visible-disc fraction over 2026: 0 → 0, 0.3 → 40, 0.6 → 80, 0.9 → 100 |
-| **Earth connectivity** (0.25), gate τ = 10, k = 1 | Earth visible now (0.30) | 0 → 0, 1 → 100 |
-| | link margin above the terrain (0.20) | 0° → 0, 2° → 60, 10° → 100 |
-| | Earth contact remaining (0.25) | 0 h → 0, 24 h → 40, 7 d → 80, 14 d → 100 |
-| | annual Earth visibility (0.25) | fraction of 2026: 0 → 0, 0.5 → 70, 1 → 100 |
-| **Landing** (0.50), gate τ = 40, k = 2 | slope (0.60) | 0–5° → 100, 10° → 50, 15° → 0, **> 15° knockout** |
-| | surface temperature (0.30) | 40 K → 10, 100 K → 70, 130–360 K → 100, 420 K → 30 |
-| | elevation, as local prominence (0.10) | height above the mean of a 3 km ring: −500 m → 40, 0 → 80, +300 m → 100 |
+### Sun, Earth and stars
 
-Any sub-score near 0 dominates its category no matter how small its weight. That's
-why the non-critical curves (temperature and prominence) keep a non-zero floor. The method
-reproduces the worked example: categories of 27 / 56 / 70 with weights 0.25 / 0.25 / 0.5 give
-56 (p = 1), 52 (geometric), 44 (p = −2) and 27 (minimum).
+JPL Horizons supplies Moon-centred, light-time-corrected ICRF positions and velocities (`500@301`) every six hours for 2000–2050. The pipeline stores one ~69 KB file per year so the browser can read the vectors locally. The viewer converts UTC to dynamical time using leap seconds and the TT offset of 32.184 s, interpolates positions with cubic Hermite interpolation, and rotates them into the lunar Mean-Earth/Polar-Axis frame. Computing directions from the camera position includes parallax at the surface. [Ephemeris builder](pipeline/ephemeris.py) · [Interpolation](web/src/ephemeris.ts) · [Time conversion](web/src/time.ts)
 
-**API.** Every `query()` returns `feasibility` with the final score, the category scores, the
-sub-scores, the raw inputs, the gate and any knockouts.
+The IAU WGCCRE 2015 lunar orientation model includes all 13 periodic libration terms. Against Horizons in 2026, the sub-Earth point agreed to 0.45 arcminutes on average and 0.76 at worst. The sub-solar offset was 4.3 arcminutes, consistent with the Moon's rotation during the 8.3-minute Sun–Moon light time. Horizons gives the point as seen from the Sun, while the viewer lights the Moon at the selected instant. `setOrientationProvider()` can substitute SPICE PA attitude. [Orientation model](web/src/orientation.ts)
 
-**Overlay.** The static inputs are precomputed per grid point by
-[feasibility_grid.py](pipeline/feasibility_grid.py) (`make feasibility`). Those are height,
-slope, prominence, a 64-azimuth terrain horizon, and the 2026 sun, Earth and absorbed-flux
-statistics. They're stored as a separate quadtree of score tiles (`tiles/f/`, format `MLF1`):
-- levels 0–3 cover the whole Moon at 64 × 64 samples per tile, about 5.3 km apart at level 3;
-- levels 4–6 cover |latitude| ≥ 84° at about 670 m spacing.
+The Sun is a limb-darkened 0.53° disc. After drawing terrain, an additive pass draws its aureole, glare and six diffraction spikes. A ray from the camera estimates the terrain clearance and therefore the visible disc fraction. Glare fades behind a rim and the pass stops when the Sun is hidden or more than 70° off-axis. The ray costs about 0.5 ms at the surface and almost nothing in orbit. [Sun glare](web/src/sunGlare.ts)
 
-When the overlay is on, Web Workers evaluate the time-dependent part for the selected date and
-time, then score it with the same rules as `feasibility()` (`feasibilityScorer()`: identical
-scores, without building the breakdown). That part is the Sun and Earth now, hours of sunlight and
-Earth contact remaining (3-hour steps), and temperature. The time scans skip steps whose outcome
-is certain: a body's elevation changes by at most the angle it moves on the sky (plus parallax),
-so while it stays above a sample's highest horizon bin it can't have set (and while it stays a
-full disc below the lowest bin it can't have been up), and those steps aren't evaluated. The score is uploaded as a
-small texture per tile, and the terrain shader turns it into the colour ramp. Changing the date
-re-evaluates the visible tiles, on-screen ones first, and keeps the previous colours until new
-ones arrive.
+Earth appears as a shaded sphere impostor. Greenwich sidereal time sets its rotation and sunlight sets its phase. A thin rim represents the atmosphere. The 1024 × 512 Blue Marble texture (145 KB) includes clouds recovered from the difference between two NASA SVS images of Earth with and without clouds. On the Moon, the lunar-Lambert reflectance model uses McEwen's (1996) phase-dependent weight. Earthshine varies with Earth's phase and a small ambient term supplies the remaining light.
 
-**Where the overlay differs from the API at the same point:**
-- **Horizon resolution:** 64 azimuths instead of 360.
-- **Mast height:** the overlay's horizons are marched once, from 10 m, for the Sun, the Earth
-  and the temperature proxy; the API uses the config's panel and antenna heights for the score
-  and the query height for the temperature.
-- **Terrain detail:** the overlay uses height tiles up to level 6 (167 m) globally and level 9
-  (20 m) near the poles, while the API uses everything down to 5 m. Slopes therefore differ
-  where the terrain is rough at small scales.
-- **Temperature:** the overlay uses a fast proxy, not the API's 1-D model. When sunlit it's the
-  instantaneous radiative equilibrium; in shadow it's exponential cooling from 0.6 × T_deep
-  toward 0.4 × T_deep, where T_deep comes from the point's annual mean absorbed flux.
+NASA's 16K celestial map supplies the star field. A 512² cubemap loads first, followed by the highest supported resolution (2048² or 4096²) independently of terrain streaming. The orbital view renders on demand. The bottom bar updates DOM values as they change and stacks the clock above the scale and compass on narrow screens. [HUD](web/src/hud.ts) · [Compass](web/src/compass.ts)
 
-**Numbers.**
+### Tile pyramid
 
-| item | value |
-|---|---|
-| score tiles | 830: levels 0–3 global (510), levels 4–6 polar (320); 3.40 M samples |
-| size | 146 MB in `web/public/tiles/f/` |
-| precompute | 38 min on a 32-thread laptop (24 workers; the first version took 2.6 h, and the rebuild is byte-identical to it for all 830 tiles), plus 5 min to build the decoded height store (`data/cache`, 4.1 GB, regenerable). The horizon rays are marched in cache-sized blocks of 16 384 (`FEAS_CHUNK`), which matters most when all workers share the memory bandwidth |
-| overlay update after a date change | scoring is 3× faster than the first version (~19 ms per 64 × 64 tile instead of ~56 ms, one thread); the whole-Moon view was fully coloured 0.8 s after switching the overlay on (3 workers, tiles loading included). A new region also waits for its score tiles to load. The previous colours stay until the new ones arrive |
-| overlay vs API, same point and time | equatorial and mid-latitude samples within 0.2 points. Polar samples are typically within 0–4 points, up to ~20 where the 5 m and 20 m terrain give different slopes |
+The table gives the reference output of `make stats`. Pixel spacing describes the output grid. For example, the 167 m grid at low latitudes samples the 237 m SLDEM2015 source.
 
-**Reading the map.**
-- **The score is for the selected moment.** The night side is red (no power), and a yellow band
-  just ahead of the terminator marks sites with little sunlight left.
-- **Steep slopes.** Crater walls and rims steeper than 15° are knocked out, so they show red.
-- **South pole.** Only crater rims and ridges score, such as Shackleton's rim and the connecting
-  ridge towards de Gerlache. Floors are permanently dark.
-
-## Repository layout and size
-
-The git repository is **4.5 MB** (95 tracked files). The full working folder is **8.9 GB**
-after lossless compaction:
-
-| path | size | in git | what it is / how to get it back |
-|---|---:|:---:|---|
-| `pipeline/`, `web/src/`, docs, config | ~0.25 MB | yes | source code and documentation |
-| `web/public/ephem/` | 3.6 MB | yes | Sun/Earth ephemeris 2000–2050 from JPL Horizons (`make ephem`) |
-| `web/public/sky/earth.jpg`, `web/public/basis/` | 0.7 MB | yes | Earth texture, Basis transcoder |
-| `web/public/tiles/` | 2.77 GB (74,093 files) | no | generated tile pyramid (`make tiles`) and feasibility tiles (`make feasibility`) |
-| `data/raw_packed/` | 5.12 GB | no | NASA source data, losslessly packed (`make pack`) |
-| `data/raw/` | 10.93 GB when unpacked | no | `make unpack` (bit-exact, SHA-256 checked) or `make download` |
-| `data/cache/` | ~7 GB when present | no | intermediates, regenerated by `make overviews` / `make colour` |
-| `web/dist/` | ~2.7 GB when present | no | `npm run build` output (copies `public/` incl. tiles) |
-| `.venv/`, `web/node_modules/`, `tools/` | 0.57 GB | no | environments and the compiled encoder (`make venv`, `npm install`, `make basisu`) |
-
-* **What a clone contains.** A plain `git clone` has the code, the ephemeris and the Earth
-  texture, but not the tiles. Either rebuild them (see
-  [Build everything from scratch](#build-everything-from-scratch)) or copy
-  `web/public/tiles/` across separately. On GitHub, the code and tiles together are about
-  3.2 GB. Every tile is under 75 KB (the largest files are the star cubemaps), but GitHub
-  caps a single push at 2 GB, so committing
-  the tiles would take several pushes. Attaching them to a GitHub Release as archives keeps the
-  repository small. The raw data shouldn't go to GitHub: it's public NASA data (`make download`),
-  and several packed files are over GitHub's 100 MB per-file limit.
-* **Lossless packing.** `make pack` compresses `data/raw` with a per-sample delta (int16 DEMs)
-  or an XOR filter (float DEM), then a byte shuffle and zstd: 10.93 GB becomes 5.12 GB. Every
-  file is verified bit-exact by SHA-256 after a full decompression before its original is
-  removed. `make unpack` restores the originals, which the tile pipeline needs.
-* **Lossless limits.** The height tiles use a dedicated lossless codec (`MLH2`, see
-  [Pipeline](#pipeline-pipeline) step 3). It is 21% smaller than the earlier planar + zlib
-  encoding (2.59 → 2.04 GB), and the walk-terrain grids are 23% smaller (40.5 → 31.2 MB).
-  General-purpose coders would save less: zstd-19 on the same residuals saves 11%. The KTX2
-  colour tiles already use zstd (1.3% more is possible at the maximum level). The EXR sources
-  are already compressed. Shrinking further would need lossy changes, such as coarser height
-  quantisation or ETC1S colour; neither is applied.
-
-## How it works
-
-### Pipeline (`pipeline/`)
-1. **Download** ([download.py](pipeline/download.py)): resumable, multi-connection, multi-mirror
-   (PDS Geosciences + MIT) HTTP range downloader.
-2. **Sources** ([moonlod/sources.py](pipeline/moonlod/sources.py)): PDS3 labels are parsed for
-   scale, offset, unit and projection. Raw `.IMG` rasters are memory-mapped (out of core). Each
-   source gets a cached 2×2-mean overview pyramid.
-   * Isolated gridding outliers in the LOLA polar DEMs are despiked: a sample is replaced by its
-     3×3 median only if it deviates by more than max(15 m, 1.5 × the grid spacing), which
-     touches about 0.0001% of samples. Set `despike_m` to 0 in
-     [config.json](pipeline/config.json) to use the untouched values.
-3. **Height tiles** ([moonlod/heights.py](pipeline/moonlod/heights.py)): cube-sphere, 6 faces,
-   equi-angular (EAC) mapping, one quadtree per face. Each tile is 257×257 vertices plus a
-   1-sample border (259×259) for seamless normals.
-   * Sources are composited from coarse to fine, and each finer source is blended in over a
-     latitude band inside its coverage edge. That covers the ±60° SLDEM/LOLA seam and the 45°, 60°,
-     75°, 80° and 87.5° polar-cap edges.
-   * Sampling is **trilinear over the source mip pyramid**, using each sample's analytic EAC
-     footprint. Samples on a shared tile edge therefore get bit-identical heights, and no seams
-     appear between tiles or faces.
-   * Encoding (`MLH2`, [moonlod/gridcodec.py](pipeline/moonlod/gridcodec.py)): 16-bit quantised
-     heights with a per-tile base and step. The step is about cell/256: 32 m at L0, 3 cm at L11.
-     The grid is stored losslessly in three steps. A lattice step divides out a common value
-     spacing, which appears when a grid was resampled from coarser quantised data. Prediction uses
-     either a planar predictor (left + up − upleft) or an 11-neighbour least-squares predictor
-     fitted to each tile, whichever codes smaller. Static rANS then codes the residual tokens,
-     with one frequency table per local-activity context. The browser decodes it with
-     [gridCodec.ts](web/src/terrain/gridCodec.ts), about 3–4 ms per tile in a worker, with no
-     library. A pyramid built in the older zlib format (`MLH1`) is converted in place, bit-exact,
-     by `make transcode-heights`.
-   * A tile at level L exists only if some source covering it has a resolution ≤ 1.5 × the
-     cell size of L. Child sets are all-or-nothing.
-4. **Colour tiles**: 256² tiles up to L5 (≈333 m/px, matching the ~400 m source). Texels are
-   corner-aligned, so edge texels sit on the tile boundary and neighbours match. They're sampled
-   trilinearly like the heights and stored as KTX2 with mipmaps: ETC1S for L0–L1 (small initial
-   load) and UASTC + zstd for L2–L5 (no chroma blocking when magnified). Deeper tiles reuse the L5
-   texture with a UV transform.
-5. **Stars** use NASA’s 16K celestial map. A 512² cubemap covers the first frames while the
-   viewer loads the 4096² sky independently of terrain. A 2048² version serves smaller GPUs.
-6. **Ephemeris** ([ephemeris.py](pipeline/ephemeris.py)): the Horizons API sends no CORS
-   headers, so the browser can't query it live. The pipeline fetches Moon-centred (`500@301`),
-   light-time-corrected ICRF state vectors (position + velocity) of the Sun and the Earth every
-   6 h for 2000–2050. It stores them as one ~69 KB file per year in `web/public/ephem/` (3.6 MB in
-   total). `--validate` checks the viewer's Moon orientation against Horizons' own sub-Earth and
-   sub-solar points (see below).
-7. **Earth texture**: NASA Blue Marble (SVS 2915) with clouds baked in (opacity recovered from
-   the SVS 3615 with/without-clouds pair), a 1024×512 JPEG (145 KB) in `web/public/sky/`.
-8. **Packing** ([pack_raw.py](pipeline/pack_raw.py)): optional, lossless, verified compression of
-   the raw downloads (see above).
-
-### Viewer (`web/`)
-* **Quadtree LOD** ([TileTree.ts](web/src/terrain/TileTree.ts)): each level L has a split distance
-  D_L = max(P·texel_L / threshold, 2.5·tile diagonal), where P is the projection scale in pixels.
-  This makes the selection screen-space-error driven (about 1.25 px per height texel) and keeps
-  neighbouring tiles at most one level apart.
-  * **Frustum culling** uses bounding spheres. **Horizon culling** tests the tile's probe points
-    against the lowest-radius occluding sphere.
-  * Children replace their parent only when all 4 are loaded.
-* **Geomorphing (CDLOD)**: odd vertices slide onto the parent grid over [0.8·D_{L-1}, D_{L-1}]
-  using per-vertex camera distance. **Skirts** hide residual T-junction cracks.
-* **One shared grid mesh** for all tiles: 65×65 vertices plus skirts by default (`?mesh=32|64|128`
-  to change). The vertex shader displaces it from a R16UI height texture (259² samples). Normals
-  are baked per tile in a Web Worker into an RG16F tangent-space map with mips, so lighting always
-  uses the full height resolution.
-* **Precision**: positions are never formed in absolute coordinates on the GPU. The CPU (float64)
-  supplies the tile origin relative to the camera, and the shader adds the small offset
-  R·(dir − dir_c) + h·dir. That offset is computed with cancellation-free identities, so there is
-  no jitter at 5 m/px. The near and far planes adapt to the height above the terrain.
-* **Streaming**: height tiles are fetched and decoded in a worker pool and prioritised by
-  screen-space error. Colour KTX2 files are transcoded in three.js's KTX2Loader workers. An LRU
-  evicts GPU textures above the budget (384 MB). The worker's normal-map bake takes ~2 ms per
-  tile (reused scratch buffers, `sqrt(1 + s² + t²)` for the cube-sphere direction length, native
-  `Float16Array` conversion where available), so a new 3 km view refines about twice as fast as
-  before (a fresh mare site: 104 tiles in 0.35 s instead of 1.04 s, local dev server).
-* **Render on demand**: a frame is drawn only when the camera moves, inertia is active, or a tile
-  arrives.
-* **Time and sky bodies** ([ephemeris.ts](web/src/ephemeris.ts), [time.ts](web/src/time.ts)): UTC
-  is converted to TDB using leap seconds plus 32.184 s. The yearly Horizons file is
-  cubic-Hermite interpolated from positions and velocities, then rotated into the Moon's body frame.
-  * **Sun**: drawn as a limb-darkened 0.53° disc. Its glare (bright aureole, wide veil and six
-    thin diffraction spikes) is a separate additive pass after the terrain
-    ([sunGlare.ts](web/src/sunGlare.ts)), so it spills over the lunar limb and horizon. It is
-    scaled by the visible fraction of the solar disc: one ray per frame is marched from the
-    camera towards the Sun over the loaded terrain, and the smallest clearance angle acts as the
-    horizon for the disc (≈0.5 ms at the surface, ≈0 in orbit), so the glare fades as the Sun
-    sinks behind a rim or the limb. The pass is skipped when the Sun is hidden or more than 70°
-    off the view axis.
-  * **Earth**: drawn as a sphere impostor. The Blue Marble texture (clouds baked in) is rotated by Greenwich
-    sidereal time and lit by the Sun, so it shows its real phase and the face turned towards the
-    Moon. It also has a thin atmosphere rim.
-  * Both directions are computed from the camera position rather than the Moon's centre, so the
-    parallax is exact when you're close to the Moon. Terrain naturally hides both below the
-    horizon.
-* **Lighting**: the Sun's direction comes from the ephemeris. The BRDF is lunar-Lambert with the
-  phase-dependent weight L(α) from McEwen (1996), so the surface is flat near full Moon and darker
-  looking into the Sun. Earthshine lights the night side, scaled by the Earth's phase as seen from
-  the Moon, and a very small ambient term is added.
-* **Bottom bar** ([hud.ts](web/src/hud.ts), [compass.ts](web/src/compass.ts)): plain DOM over the
-  canvas. It writes to the DOM only when a value changes, and on narrow screens it stacks: the
-  date/time box on top, the scale bar and compass below. Pointer and wheel events on the bar
-  don't reach the globe controls.
-* **Orientation**: the full time-dependent IAU WGCCRE 2015 Moon model, including the 13 periodic
-  libration terms ([orientation.ts](web/src/orientation.ts)). It rotates the J2000 star cubemap
-  and the Horizons vectors into the Moon's ME/PA frame. Against Horizons over 2026, the sub-Earth
-  point agrees to 0.45′ mean and 0.76′ max. The sub-solar point differs by a constant 4.3′.
-  Horizons reports the Moon as the Sun sees it, 8.3 minutes earlier, while lighting at time t
-  needs the Moon's orientation at t, which the viewer uses. `setOrientationProvider()` can swap in
-  SPICE PA attitude.
-
-## Tile pyramid and numbers
-
-### Tile pyramid (output of `make stats`)
-
-| level | ~m/px | height tiles | height size | colour tiles | colour size | where |
+| Level | ~m/px | Height tiles | Height size | Colour tiles | Colour size | Coverage |
 |---:|---:|---:|---:|---:|---:|---|
 | 0 | 10 661 | 6 | 218 KB | 6 | 147 KB | global |
 | 1 | 5 330 | 24 | 910 KB | 24 | 569 KB | global |
@@ -513,62 +324,36 @@ after lossless compaction:
 | 6 | 167 | 12 896 | 391.4 MB | | | global (SLDEM2015 128 ppd / LOLA 200 m) |
 | 7 | 83 | 7 520 | 206.5 MB | | | ≥ 60° N/S (LOLA 120 m) |
 | 8 | 42 | 12 288 | 327.1 MB | | | ≥ 75° N/S (LOLA 60 m) |
-| 9 | 21 | 10 704 | 361.4 MB | | | ≤ 80° S (LOLA 20 m) |
-| 10 | 10 | 2 800 | 106.5 MB | | | ≤ 87.5° S |
-| 11 | **5.2** | 10 672 | 364.4 MB | | | ≤ 87.5° S (LOLA 5 m) |
+| 9 | 21 | 10 704 | 361.4 MB | | | 80°S and farther south (LOLA 20 m) |
+| 10 | 10 | 2 800 | 106.5 MB | | | 87.5°S and farther south |
+| 11 | **5.2** | 10 672 | 364.4 MB | | | 87.5°S and farther south (LOLA 5 m) |
 | **total** | | **65 070** | **2.04 GB** | **8 190** | **430 MB** | **2.5 GB** on disk |
 
-* **Maximum resolution reached**: 5.2 m/px (L11) inside 87.5°S, which includes Shackleton, de Gerlache,
-  Shoemaker and the Artemis candidate regions. It is 20.8 m to 80°S, 41.6 m at both caps beyond
-  75°, 83 m beyond 60°, and 167 m elsewhere. That last figure is limited by the 237 m SLDEM2015 grid
-  used here. With the 512 ppd SLDEM grid (45 GB) the same pipeline would reach about 42 m at L8.
-* Each height tile has 257×257 samples plus a 1-sample border (259²) and averages 27–38 KB.
-  Colour tiles are ETC1S at L0–L1 (~24 KB) and UASTC from L2 (~51 KB). With the star cubemaps
-  (4.6 MB), `meta.json` and the 830 feasibility tiles (146 MB), `web/public/tiles/` holds
-  74,093 files and 2.77 GB.
-* Build time on a 32-thread laptop: overviews ~14 min (despiking the 5 m and 20 m grids takes most of
-  it), heights 15 min with 24 processes, colour ~17 min, ephemeris ~2 min (102 Horizons requests).
+The 5.2 m grid covers latitudes south of 87.5°S, including Shackleton, de Gerlache, Shoemaker and south polar Artemis candidate regions. The finer 512-pixel-per-degree SLDEM product (45 GB) could support an L8 grid of about 42 m at lower latitudes. The source catalogue describes the extra multi-tile support this would require. [Elevation products and coverage](DATA_SOURCES.md)
 
-### Performance (Chrome 156, measured)
+Height tiles average 27–38 KB. Colour tiles average about 24 KB at L0–L1 and 51 KB from L2. The reference build contained 74,093 files including the terrain, sky, feasibility tiles and manifest. On the 32-thread build machine, the overviews took about 14 min (mostly polar despiking), heights 15 min with 24 processes, colour 17 min and the ephemeris 2 min for 102 Horizons requests.
 
-Measured on an RTX 4070 Laptop GPU (ANGLE/D3D11) with a 1920×1080 canvas at DPR 1 and
-MSAA on, using [web/bench/bench.js](web/bench/bench.js). Each frame is forced with `gl.finish()` while
-the camera turns, so the time includes CPU LOD selection and GPU work. The vsync-limited real
-frame rate is 60 fps in every case.
+### Rendering benchmarks
 
-These numbers were measured before the Sun/Earth sky and the bottom bar were added. The sky adds
-one full-screen pass with a few trigonometric operations per pixel, and the bar is plain DOM,
-so the terrain cost dominates. They haven't been re-measured.
+These orbital measurements used Chrome 156, an RTX 4070 Laptop GPU (ANGLE/D3D11), a 1920 × 1080 canvas at DPR 1 and MSAA. Each rotating frame ended with `gl.finish()`, so frame time includes CPU tile selection and GPU rendering. Vsync capped displayed output at 60 fps. The uncapped column is the reciprocal of measured frame time. This benchmark predates the Sun/Earth sky pass and the bottom bar. [Benchmark script](web/bench/bench.js)
 
-| view | tiles | triangles | tex. memory | frame (avg / p95) | GPU time | ≈ fps (uncapped) |
+| View | Tiles | Triangles | Texture memory | Frame (mean / p95) | GPU time | Uncapped fps |
 |---|---:|---:|---:|---:|---:|---:|
 | whole Moon | 56 | 0.49 M | 43 MB | 0.74 / 1.5 ms | 0.15 ms | 1 350 |
 | 200 km orbit | 23 | 0.20 M | 137 MB | 0.71 / 1.7 ms | 0.31 ms | 1 400 |
 | Shackleton, 25 km, tilted | 250 | 2.18 M | 357 MB | 3.2 / 5.2 ms | 1.1 ms | 310 |
 | Shackleton rim, 3 km (L11, 5 m) | 317 | 2.76 M | 365 MB | 4.0 / 6.2 ms | 0.9 ms | 250 |
 
-* Texture memory is the LRU cache. It is capped by `gpuBudgetBytes` (384 MB) and includes off-screen
-  tiles. My estimate for the working set of the 3 km view is ~155 MB: 317 drawn tiles × 488 KB
-  (R16UI heights + mipmapped RG16F normals) plus their ancestors and colour. Geometry is one shared
-  65×65 grid with skirts (~110 KB).
-* For a mid-range laptop (an Iris Xe class iGPU has roughly 1/10 of this GPU's throughput),
-  1–1.5 ms of GPU time leaves about 10 ms of headroom inside a 16.7 ms frame. To tune it, use
-  `pixelsPerTexel` (LOD threshold) in [main.ts](web/src/main.ts), `?mesh=32|64|128` (mesh density),
-  and `gpuBudgetBytes`. We have not measured it on such hardware. Run `moonBench()` from
-  [bench.js](web/bench/bench.js) in the console to get your own numbers.
-* Streaming: finished tiles are promoted to the GPU at least 1 and at most 8 per frame, within a
-  3 ms budget that includes the texture uploads (`renderer.initTexture` while promoting, not later
-  inside `render`). Before this throttle, frames during fast flights spiked to 87–132 ms p95. With
-  it they stay at 5–6 ms (a fresh 3 km polar view: 284 tiles, p95 3.1 ms, worst 5.4 ms). After the 512²
-  preview, the largest star cubemap the GPU supports is loaded right away, independently of the
-  terrain streaming.
+Texture memory includes cached off-screen tiles. At 3 km the 317 drawn tiles account for roughly 155 MB at 488 KB each for heights and normals, plus ancestor tiles and colour. The shared grid and skirts occupy about 110 KB. To measure another GPU, paste the benchmark script into the viewer console and run `await moonBench()`. Adjust `pixelsPerTexel`, `gpuBudgetBytes` or the mesh query parameter (`?mesh=32`, `?mesh=64` or `?mesh=128`). Integrated GPU performance has not been measured. [Viewer settings](web/src/main.ts)
 
-### Initial payload (original browser build, measured)
+During streaming, the renderer promotes one to eight ready tiles per frame within a 3 ms budget, including texture upload. Before this limit, fast flights reached 87–132 ms at p95. With it, frame times during those flights fell to 5–6 ms. One fresh 3 km polar view loaded 284 tiles with a p95 of 3.1 ms and a worst frame of 5.4 ms.
 
-Everything fetched until the first frame that has all six L0 terrain tiles, their colour, the
-star background and the Sun/Earth positions. The 145 KB Earth texture loads right after:
+<details>
+<summary>First-frame download measurements</summary>
 
-| item | size |
+The original browser build fetched the following assets before the first frame with all six base tiles, their colour, the star background and Sun/Earth positions.
+
+| Asset | Size |
 |---|---:|
 | `index.html` + JS bundle (three.js + app, gzip) | 182 KB |
 | Basis transcoder wasm | 515 KB (248 KB gzip) |
@@ -578,40 +363,27 @@ star background and the Sun/Earth positions. The 145 KB Earth texture loads righ
 | Sun/Earth ephemeris for the current year (JPL Horizons) | 69 KB |
 | **total** | **1.43 MB** (1.16 MB with gzipped wasm) |
 
-On localhost the first full frame, including the Sun and Earth, appears about 0.13–0.35 s after
-the app starts. Refinement requests are held back until the base level is complete. These measurements predate the VR branch’s higher-resolution sky.
+On localhost, that frame appeared 0.13–0.35 s after startup. The 145 KB Earth image loaded next. Finer terrain waited for the base level to finish. These measurements predate the higher-resolution VR sky.
 
-### Visual verification (automated captures)
+</details>
 
-* **Shackleton**: the rim is sharp at L11 (5 m). The floor is in permanent shadow and the far wall
-  is lit by the grazing sun. Isolated LOLA gridding spikes were removed (see DATA_SOURCES.md). The
-  remaining faint radial striations follow LOLA ground tracks and are in the source DEM.
-* **Seams**: shared tile and face edges are bit-identical in the pipeline (max difference 0.0000 m,
-  tested). Grazing-light captures at a cube-face edge (30°N, 135°E), a cube corner (35.26°S, 45°E)
-  and the ±60° SLDEM/LOLA boundary show no visible seam. Colour tiles use corner-aligned texels
-  so that adjacent tiles also match.
-* **Popping**: during a continuous zoom from 25 to 6 km over Shackleton (200 frames, 142 LOD
-  switches), each switch was rendered twice from the same camera, once with the old tile set and
-  once with the new. The mean image change per switch was 0.011 grey levels. The worst switch
-  changed 0.47% of pixels by more than 16/255. Frame-to-frame change from the camera motion itself
-  is ~13 grey levels, so LOD changes are about 1000× below motion. At a 3× coarser LOD threshold,
-  geomorphing lowers the worst switch from 0.49% to 0.38% of pixels.
+### Visual checks
+
+At Shackleton, the 5 m captures show the rim and far wall in grazing sunlight and the floor in shadow. Faint radial lines follow the LOLA ground tracks in the source elevation data.
+
+Shared tile and cube-face edges matched to 0.0000 m in the pipeline check. Grazing-light captures at a face edge (30°N, 135°E), a corner (35.26°S, 45°E) and the ±60° SLDEM/LOLA boundary showed no visible seam.
+
+A continuous zoom from 25 to 6 km above Shackleton crossed 142 level changes in 200 frames. Rendering each transition twice from the same camera isolated the effect of switching tiles. The mean change was 0.011 grey levels per switch, compared with about 13 levels from camera motion between frames. At the worst switch, 0.47% of pixels changed by more than 16/255. At a three-times-coarser LOD threshold, geomorphing reduced that fraction from 0.49% to 0.38%.
 
 ## Data credits
 
-Credits live here and in [DATA_SOURCES.md](DATA_SOURCES.md); the page itself only shows the scale,
-date/time and compass.
+Built for the *Lunar Landing Site Navigator* challenge at NASA Space Apps 2026. The [source catalogue](DATA_SOURCES.md) lists product versions, coverage, licences and validation results, and explains the choice of raw PDS products after evaluating QuickMap, Moon Trek, Horizons and CSA resources.
 
-* **Elevation**: LRO LOLA gridded and polar DEMs (LOLA team, NASA GSFC / MIT, PDS Geosciences
-  Node). SLDEM2015 LOLA + SELENE/Kaguya TC merged DEM (Barker et al. 2016; NASA GSFC PGDA / JAXA).
-* **Colour**: NASA Scientific Visualization Studio, CGI Moon Kit (2025 colour map). Based on the
-  LROC WAC Hapke-normalised mosaic (NASA/GSFC/Arizona State University).
-* **Sun and Earth positions**: JPL Horizons (Solar System Dynamics group, NASA/JPL-Caltech),
-  DE441-based ephemerides via the Horizons API.
-* **Earth image**: NASA Blue Marble (NASA Earth Observatory / SVS 2915, Reto Stöckli et al.);
-  clouds from NASA Goddard SVS 3615.
-* **Stars**: NASA Scientific Visualization Studio, Deep Star Maps 2020, 16K celestial map
-  (Hipparcos-2, Tycho-2, Gaia DR2 / ESA/Gaia/DPAC).
-* Challenge: NASA Space Apps 2026, *Lunar Landing Site Navigator*. The resources it lists
-  (QuickMap, Moon Trek, Horizons, CSA) were evaluated; see DATA_SOURCES.md for why the raw PDS
-  products were used instead.
+| Data | Credit |
+|---|---|
+| Lunar elevation | LRO LOLA gridded and polar DEMs, LOLA team (NASA GSFC, MIT and the PDS Geosciences Node). SLDEM2015 combines LOLA and SELENE/Kaguya Terrain Camera data (Barker et al., 2016, NASA GSFC PGDA and JAXA). |
+| Lunar colour | NASA Scientific Visualization Studio's 2025 CGI Moon Kit, based on the LROC WAC Hapke-normalised mosaic from NASA, GSFC and Arizona State University. |
+| Sun and Earth positions | JPL Horizons, Solar System Dynamics group, NASA/JPL-Caltech. DE441-based ephemerides via the Horizons API. |
+| Earth image | Blue Marble by Reto Stöckli and colleagues, NASA Earth Observatory and SVS 2915. Clouds from NASA Goddard SVS 3615. |
+| Stars | NASA Scientific Visualization Studio's *Deep Star Maps 2020*, based on Hipparcos-2, Tycho-2 and Gaia DR2 (ESA/Gaia/DPAC). |
+| Surface walk | Diviner rock abundance, LROC boulder counts, NASA Apollo specimen scans, regolith simulant imagery and NASA's EMU suit. [Rock credits](web/public/lunar-rocks/CREDITS.txt) · [Soil credits](web/public/lunar-soil/CREDITS.txt) · [Suit credits](web/public/astronaut/CREDITS.txt) |
